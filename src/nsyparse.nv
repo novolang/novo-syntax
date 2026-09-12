@@ -1,0 +1,211 @@
+// nsyparse.nv — tokens to a tree, and the faults found on the way.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE PARSE ALWAYS ANSWERS A TREE.  `NsyParseResult` is not a
+// `Result`, and that is the load-bearing decision of this module.  A
+// file is broken for most of the time anyone is looking at it — every
+// keystroke between `fn f(` and `fn f(x: Int)` is a file that does not
+// parse — and a language server handed `Err` for those has no outline,
+// no highlighting, no completion and no hover until the author stops
+// typing.  So a failure becomes a node: `NsyExError`, `NsyStError`,
+// `NsyDcError`, with the span that failed, and the parser
+// resynchronises and carries on.  The faults come back beside the tree.
+//
+// RECOVERY IS AT STATEMENT AND DECLARATION BOUNDARIES, and the policy
+// is a public predicate rather than a private habit — see
+// `is_recovery_point`.  The boundary is available because the language
+// is indentation-sensitive: a NEWLINE at the current indentation level,
+// an INDENT, a DEDENT or a declaration keyword at bracket depth zero
+// is a place a new statement can begin, and nothing the parser skipped
+// can change that.  A brace language has to guess at this; this one
+// does not.
+//
+// RECURSIVE DESCENT, mirroring `compiler/lib/parser.mly`'s cascade one
+// function per nonterminal.  A generated LR parser is what the
+// reference uses and it is the right choice for a batch compiler: it
+// proves the grammar unambiguous.  It is the wrong one here, for two
+// reasons that are both about the consumers — an LR parser's error
+// recovery is a table exercise with no relation to what the author
+// meant, and its state is a stack of integers no query can be asked
+// about.  Descent gives both away in exchange for the grammar being
+// checked by hand against SPEC § 6 rather than by a tool.
+//
+// NO EFFECTS.
+
+use std.list
+use nsytoken
+use nsyast
+
+// What was wrong, syntactically.
+pub enum NsyParseKind
+    // Something specific was required at this position.  `what` is the
+    // thing, in the source's own vocabulary — `")"`, `"a type"`,
+    // `"the body of the function"`.
+    NsyPfExpected(what: Str)
+    // Nothing in the grammar can begin with this token.
+    NsyPfUnexpected
+    // A bracket opened and the file ended before it closed.  The span
+    // is the OPENER's, not the end of the file, because the opener is
+    // what a person has to go and look at.
+    NsyPfUnclosed(open: NsyPunct)
+    // A header that opens an indented body — `fn`, `if`, `match`, a
+    // `->` — with no INDENT after its NEWLINE.
+    NsyPfMissingBody
+    // A `match` with no arms.
+    NsyPfMissingArms
+    // A dedent to a column no enclosing block used.
+    NsyPfBadIndent
+    // A fault token from the lexer, carried through rather than
+    // re-described.  `nsyparse` does not re-diagnose what `nsylex`
+    // already named; it reports it once, in the same list, so a
+    // consumer has ONE list of diagnostics for a file rather than two
+    // it has to merge in source order itself.
+    NsyPfLexical(fault: NsyFaultKind)
+
+// One fault: what, where, and where the parser picked up again.
+//
+// `resumed_at` is what an editor greys out.  A fault with no
+// `resumed_at` is one the parser handled in place — an expected token
+// it inserted — and nothing was skipped.
+pub struct NsyParseFault
+    kind: NsyParseKind
+    span: NsySpan
+    resumed_at: ?NsySpan
+
+// A parse: the tree, and everything wrong with it.
+//
+// `NsyTree` is always populated.  `faults` empty is the only thing
+// that means the file is well-formed — a caller must not read
+// "non-empty tree" as success, and this is the one place where saying
+// so in a doc comment is not enough, which is why `is_clean` exists.
+pub struct NsyParseResult
+    tree: NsyTree
+    faults: [NsyParseFault]
+
+// Lex and parse a whole source.
+//
+// ```novo
+// use nsytoken
+// use nsyparse
+//
+// fn main() [io]
+//     let r = nsyparse.parse(nsytoken.source("fn main()\n    pass\n"))
+//     println("${list.len(r.tree.decls)}")
+// ```
+pub fn parse(src: NsySource) -> NsyParseResult
+    todo("novo-syntax.nsyparse.parse")
+
+// Parse a token stream that has already been lexed.
+//
+// The entry point a language server uses after `nsylex.splice`: the
+// tokens are already there, and re-lexing the file to parse it would
+// throw the incremental work away.  Trivia in the stream are skipped
+// here rather than by the caller — `nsyprint` wants them, so removing
+// them before the parse would mean lexing twice.
+pub fn parse_tokens(src: NsySource, toks: [NsyToken]) -> NsyParseResult
+    todo("novo-syntax.nsyparse.parse_tokens")
+
+// Is the parse free of faults?  The only correct success test.
+//
+// ```novo
+// use nsytoken
+// use nsyparse
+//
+// fn main() [io]
+//     println("${nsyparse.is_clean(nsyparse.parse(nsytoken.source("pass\n")))}")
+// ```
+pub fn is_clean(result: NsyParseResult) -> Bool
+    todo("novo-syntax.nsyparse.is_clean")
+
+// ── the smaller entry points ────────────────────────────────────────
+
+// Parse one expression, and nothing after it.
+//
+// Three callers, and they are why this is public: the interpolation
+// hole inside a string literal, an editor evaluating a selection, and
+// a test that wants to assert about one expression without wrapping it
+// in a function.  Trailing tokens are an `NsyPfExpected("end of the
+// expression")` fault rather than a silent truncation.
+pub fn parse_expr(src: NsySource, toks: [NsyToken]) -> NsyExprResult
+    todo("novo-syntax.nsyparse.parse_expr")
+
+// One expression and the faults found reading it.
+pub struct NsyExprResult
+    expr: NsyExpr
+    faults: [NsyParseFault]
+
+// Parse one written type — `[(Int, Str)]`, `fn(Int) -> Str [io]`.
+//
+// What a hover that renders an annotation uses, and what a consumer
+// building an impl key from a string needs before it can call
+// `nsyast.impl_target_key`.
+pub fn parse_type(src: NsySource, toks: [NsyToken]) -> NsyTypeResult
+    todo("novo-syntax.nsyparse.parse_type")
+
+// One written type and the faults found reading it.
+pub struct NsyTypeResult
+    ty: NsyType
+    faults: [NsyParseFault]
+
+// Parse the body of one interpolation hole.
+//
+// `seg` must be an `NsySegHole`; its token run was lexed by a lexer
+// seeded to the hole's file offset, so the expression this answers
+// carries FILE spans and a query by offset finds it like any other
+// node.  A `NsySegLit` answers an `NsyExError` at the segment's span,
+// because asking for the expression in a piece of literal text is a
+// caller's mistake and not a source's.
+pub fn parse_hole(src: NsySource, seg: NsyStrSeg) -> NsyExprResult
+    todo("novo-syntax.nsyparse.parse_hole")
+
+// ── the recovery policy, in the open ────────────────────────────────
+
+// Can a statement or declaration begin at token `index`?
+//
+// THE RECOVERY POLICY AS A PREDICATE.  When the parser gives up on a
+// construct it advances until this answers true, so the rule that
+// decides how much of a file a single typo costs is a function a
+// consumer can call, a test can table-drive, and a reader can check
+// against the grammar — rather than a loop condition buried in a
+// private function where it can only be inferred from the damage.
+//
+// True at: a NEWLINE followed by a token at or outside the current
+// indentation, an INDENT, a DEDENT, `fn`/`struct`/`enum`/`trait`/
+// `impl`/`use`/`type`/`const`/`static`/`alias` at bracket depth zero,
+// and the EOF.  False inside any unclosed bracket, because skipping
+// out of one loses the pairing that told us where we were.
+pub fn is_recovery_point(toks: [NsyToken], index: Int) -> Bool
+    todo("novo-syntax.nsyparse.is_recovery_point")
+
+// The next index at or after `index` that `is_recovery_point` accepts.
+//
+// What the parser calls after it records a fault.  Public for the same
+// reason the predicate is: a consumer that wants to re-parse only the
+// damaged region of a large file needs to know where the damage ends,
+// and this is that answer.
+pub fn next_recovery_point(toks: [NsyToken], index: Int) -> Int
+    todo("novo-syntax.nsyparse.next_recovery_point")
+
+// ── reading the faults ──────────────────────────────────────────────
+
+// A one-line message for a fault, in the compiler's own wording where
+// the two can raise the same fault.
+//
+// A message and not a code.  This package assigns no `E1002`-style
+// identifiers: the compiler owns that namespace, a package that minted
+// its own would collide with it the first time both appeared in one
+// diagnostic list, and a consumer that wants codes is building a
+// compiler and has them.
+pub fn fault_message(fault: NsyParseFault) -> Str
+    todo("novo-syntax.nsyparse.fault_message")
+
+// The faults that fall on one line, in column order.  What an editor
+// asks for when it draws a gutter.
+pub fn faults_on_line(src: NsySource, faults: [NsyParseFault], line: Int) -> [NsyParseFault]
+    todo("novo-syntax.nsyparse.faults_on_line")
+
+// The first fault, or `None`.  The one a command-line tool prints when
+// it prints one.
+pub fn first_fault(result: NsyParseResult) -> ?NsyParseFault
+    todo("novo-syntax.nsyparse.first_fault")

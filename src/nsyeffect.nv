@@ -1,0 +1,204 @@
+// nsyeffect.nv — the effect row every function carries.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE SAME TABLE, FOR THE SAME REASON.  `nsyeffect` takes the
+// `NsySigTable` a caller built for `nsycheck` and adds nothing of its
+// own: an effect row is a property of a CALL GRAPH, and the call graph
+// runs through the standard library, the project's other modules and
+// every dependency.  The harness this was cut from carries a generated
+// `stdlib_effects.nv` — 1,438 lines of one release's rows — and
+// `nsycheck`'s header says why a published package may not.  The one
+// extra fact worth stating here is that effect rows change more often
+// than signatures do: a stdlib function that gains `[time]` in a
+// patch release changes the row of everything that calls it, and a
+// package with the old row baked in would report a clean file as
+// over-budget with no way for anyone to correct it.
+//
+// WHY A SEPARATE MODULE FROM `nsycheck`.  The reference splits them
+// too (`typecheck.ml` and `effectcheck.ml`), and the split is real
+// here for a consumer's reason: an editor that wants go-to-definition
+// does not want to pay for a whole-program effect closure, and a lint
+// that reports undeclared effects does not want the resolution faults.
+// The effect pass takes the resolution as input, so a caller that
+// wants both computes the resolution once.
+//
+// WHAT THE ROW IS.  SPEC § 5.5 charges a function the union of what it
+// performs directly and what everything it calls performs.  That union
+// is a fixed point over the call graph, because recursion exists —
+// which is why `rows_of` answers a whole file's rows at once rather
+// than a function's row on demand: computing one row means computing
+// the component it sits in, and answering them one at a time would
+// redo that work per question.
+//
+// NO EFFECTS.  A module that computes what other code spends spends
+// nothing itself.
+
+use std.list
+use nsytoken
+use nsycheck
+
+// A function's row: what it declares, and what it actually costs.
+//
+// BOTH, AND THE PAIR IS THE POINT.  The declared clause is a claim and
+// the inferred row is the measurement, and every question worth asking
+// is about the difference: a clause narrower than the row is a program
+// the compiler refuses; one wider is an over-declaration a reader is
+// entitled to know about; and a `core` package's audit is the row
+// against a budget rather than the clause against it, because a clause
+// nobody checked is a comment.
+pub struct NsyRow
+    // The function, as it appears in the signature table.
+    name: Str
+    module: Str
+    owner: Str
+    // What the source wrote, `written` and all — `fn go() []` is not
+    // `fn go()`, and the row pass is where that difference is finally
+    // used for something.
+    declared: NsyEffects
+    // The union SPEC § 5.5 charges: what the body performs, plus every
+    // row reachable from it.
+    inferred: [NsyEffectLabel]
+    // Effect parameters the row is polymorphic in, and did not
+    // discharge — the `e` of `fn count<S: Read[e]>(s: S) -> Int [e]`.
+    // A caller substitutes each with the supply of the impl its type
+    // argument resolves to, which is why this is a list of names and
+    // not a resolved set.
+    polymorphic: [Str]
+    span: NsySpan
+
+// What is wrong with a row.
+pub enum NsyEffKind
+    // The body performs more than the clause admits.  The labels are
+    // on the fault.
+    NsyEfUndeclared
+    // The clause admits more than the body performs.
+    NsyEfOverDeclared
+    // An `@ffi` declaration with no clause at all.  A body-less
+    // function's inferred set is unconditionally empty, so the
+    // declaration can only ever be TRUSTED — which is why writing it
+    // is required and `[]` has to be spelled out when the author means
+    // "asserted pure across the foreign boundary".
+    NsyEfFfiNoClause
+    // An impl of a trait with an effect parameter that supplies no
+    // clause.
+    NsyEfImplNoSupply
+    // A trait declaring more than one effect parameter.  Parsed,
+    // because the grammar admits it; reported, because the impl side
+    // has no grouping syntax for a second one.
+    NsyEfMultipleParams
+    // An effect-discharge block (SPEC § 5.4) naming a label its body
+    // does not perform.
+    NsyEfIdleDischarge
+    // A row outside the budget a caller supplied.  The budget is the
+    // caller's — this package has no opinion about which layer anyone
+    // is in — so this fault only appears when `check_budget` is the
+    // call being made.
+    NsyEfOverBudget
+
+// One effect fault: what, which labels it is about, and where.
+pub struct NsyEffFault
+    kind: NsyEffKind
+    name: Str
+    // The labels the fault is about: the undeclared ones, the
+    // over-declared ones, the ones outside the budget.
+    labels: [NsyEffectLabel]
+    span: NsySpan
+
+// Every row in a file, and everything wrong with them.
+pub struct NsyRows
+    rows: [NsyRow]
+    faults: [NsyEffFault]
+
+// The rows of a file, computed over its resolution.
+//
+// One call for the whole file because the answer is a fixed point over
+// the call graph; asking function by function would recompute each
+// recursive component once per member.
+//
+// ```novo
+// use nsytoken
+// use nsyparse
+// use nsycheck
+// use nsyeffect
+//
+// fn main() [io]
+//     let s = nsytoken.source("fn main()\n    pass\n")
+//     let r = nsyparse.parse(s)
+//     let res = nsycheck.resolve(s, r.tree, nsycheck.empty_table())
+//     println("${list.len(nsyeffect.rows_of(s, r.tree, res).rows)}")
+// ```
+pub fn rows_of(src: NsySource, tree: NsyTree, res: NsyResolution) -> NsyRows
+    todo("novo-syntax.nsyeffect.rows_of")
+
+// The row of one function by name, from a computed set.
+pub fn row_of(rows: NsyRows, module: Str, name: Str) -> ?NsyRow
+    todo("novo-syntax.nsyeffect.row_of")
+
+// The row of the function containing `offset` — what a hover shows
+// beside a signature, and what an editor underlines when a clause is
+// narrower than the body.
+pub fn row_at(rows: NsyRows, offset: Int) -> ?NsyRow
+    todo("novo-syntax.nsyeffect.row_at")
+
+// ── the label algebra ───────────────────────────────────────────────
+//
+// Four functions over sets of labels.  Public because the whole
+// vocabulary of an effect question is here and a consumer that
+// re-implemented it would get the polymorphic case wrong: `NsyEffPoly`
+// compares by NAME, and a union that compared variants structurally
+// would fold two different bound parameters into one.
+
+// Every label in either, once, in the canonical order labels are
+// printed in.
+pub fn union(a: [NsyEffectLabel], b: [NsyEffectLabel]) -> [NsyEffectLabel]
+    todo("novo-syntax.nsyeffect.union")
+
+// Every label in `a` that is not in `b`.  What a discharge computes,
+// and what an over-declaration is.
+pub fn difference(a: [NsyEffectLabel], b: [NsyEffectLabel]) -> [NsyEffectLabel]
+    todo("novo-syntax.nsyeffect.difference")
+
+// Is the label in the set?
+pub fn holds(labels: [NsyEffectLabel], one: NsyEffectLabel) -> Bool
+    todo("novo-syntax.nsyeffect.holds")
+
+// Is every label of `a` in `b`?  The subset test a budget check is.
+pub fn within(a: [NsyEffectLabel], b: [NsyEffectLabel]) -> Bool
+    todo("novo-syntax.nsyeffect.within")
+
+// The set as source text — `[io, fs]`, or `[]` for the empty one.
+pub fn row_text(labels: [NsyEffectLabel]) -> Str
+    todo("novo-syntax.nsyeffect.row_text")
+
+// ── budgets, without an opinion ─────────────────────────────────────
+
+// The rows of the public functions that go outside a budget.
+//
+// THE BUDGET IS THE CALLER'S ARGUMENT.  This package does not know
+// what `core` means, does not read a manifest, and has no list of
+// layers — those live in the toolchain, which is where they are
+// enforced and where they change.  What this answers is the arithmetic
+// the enforcement is made of, so a package audit, a CI check and an
+// editor's warning can all get the same answer from the same
+// implementation rather than three.
+//
+// `pub_only` restricts the answer to the declarations the layer rules
+// are actually about: a private helper's effects are charged to
+// whatever public function reaches it, so reporting the helper as well
+// reports one fault twice.
+pub fn check_budget(rows: NsyRows, budget: [NsyEffectLabel], pub_only: Bool) -> [NsyEffFault]
+    todo("novo-syntax.nsyeffect.check_budget")
+
+// Every effect-discharge block (SPEC § 5.4) in a file, with the labels
+// it erases.
+//
+// A list rather than a verdict, for the same reason: whether a
+// discharge is allowed is a policy — a `core` package may have none —
+// and the policy is the caller's.
+pub fn discharges(src: NsySource, tree: NsyTree) -> [NsyEffFault]
+    todo("novo-syntax.nsyeffect.discharges")
+
+// A one-line message for an effect fault.
+pub fn fault_message(fault: NsyEffFault) -> Str
+    todo("novo-syntax.nsyeffect.fault_message")

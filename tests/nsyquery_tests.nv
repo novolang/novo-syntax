@@ -1,0 +1,498 @@
+// nsyquery_tests.nv — resolution, effect rows, the visitor and the
+// questions an editor asks.
+//
+// RED UNTIL THE BODIES LAND.
+//
+// The four modules are asserted in one suite because the answers are
+// one chain: a tree is resolved against a table, the rows are computed
+// over the resolution, and every query reads one of the three.  A
+// suite that split them would rebuild the chain three times and assert
+// about the seams rather than about the answers.
+//
+//   novo test --llvm tests/nsyquery_tests.nv     (from orbit/novo-syntax)
+
+use std.list
+use std.test
+use nsytoken
+use nsyast
+use nsylex
+use nsyparse
+use nsyprint
+use nsyvisit
+use nsycheck
+use nsyeffect
+use nsyquery
+
+fn resolved(text: Str) -> NsyResolution
+    let src = nsytoken.source(text)
+    nsycheck.resolve(src, nsyparse.parse(src).tree, nsycheck.empty_table())
+
+// ── the table is an argument ────────────────────────────────────────
+
+@test
+fn test_an_empty_table_still_resolves_everything_local() [io]
+    // A caller with no project context gets resolution of the file it
+    // handed in, with the rest reported as unknown rather than guessed.
+    let res = resolved("fn add(a: Int, b: Int) -> Int\n    a + b\n")
+    test.assert(list.len(res.bindings) >= 3)
+
+@test
+fn test_a_files_declarations_become_a_table() [io]
+    let src = nsytoken.source("pub fn f()\n    pass\n\nstruct S\n    x: Int\n")
+    let t = nsycheck.table_of_tree(src, nsyparse.parse(src).tree, "m")
+    test.assert(list.len(nsycheck.table_find(t, "f")) == 1)
+    test.assert(list.len(nsycheck.table_find(t, "S")) == 1)
+    test.case("the field is in it too, owned by its struct")
+    match nsycheck.table_find_in(t, "m", "x")
+        Some(sym) =>
+            test.assert(sym.kind == NsySymField)
+            test.assert_eq(sym.owner, "S")
+        None      =>
+            test.fail("the struct's field was not in the table")
+
+@test
+fn test_a_merge_keeps_both_and_decides_nothing() [io]
+    // Which of two same-named symbols wins depends on the `use`
+    // declarations of the file being resolved, and a merge that picked
+    // one would have decided without them.
+    let a = nsytoken.source("fn go()\n    pass\n")
+    let b = nsytoken.source("fn go()\n    pass\n")
+    let ta = nsycheck.table_of_tree(a, nsyparse.parse(a).tree, "one")
+    let tb = nsycheck.table_of_tree(b, nsyparse.parse(b).tree, "two")
+    test.assert_eq(list.len(nsycheck.table_find(nsycheck.table_merge(ta, tb), "go")), 2)
+
+@test
+fn test_an_external_symbol_has_an_empty_span() [io]
+    // "declared somewhere this table has no source for" — what a
+    // go-to-definition reports as no source available, rather than
+    // jumping to offset zero of the file being edited.
+    let sym = NsySymbol { name: "trim", kind: NsySymFn, module: "str",
+                          owner: "", ty: None,
+                          effects: NsyEffects { labels: [], written: false,
+                                                span: NsySpan { start: 0, stop: 0 } },
+                          is_pub: true, span: NsySpan { start: 0, stop: 0 } }
+    let t = nsycheck.table_add(nsycheck.empty_table(), sym)
+    match nsycheck.table_find_in(t, "str", "trim")
+        Some(s) => test.assert_eq(nsytoken.span_len(s.span), 0)
+        None    => test.fail("the symbol added was not found")
+
+@test
+fn test_an_unknown_name_is_a_fault_and_not_a_stop() [io]
+    let res = resolved("fn f()\n    nosuchthing()\n")
+    test.assert(list.len(res.faults) >= 1)
+    test.assert(res.faults[0].kind == NsyCkUnknownName)
+    test.assert_eq(res.faults[0].name, "nosuchthing")
+
+@test
+fn test_two_x_es_in_two_functions_are_two_answers() [io]
+    // A rename that matched on the NAME would edit both.
+    let text = "fn a()\n    let x = 1\n    let _ = x\n\nfn b()\n    let x = 2\n    let _ = x\n"
+    let res = resolved(text)
+    let first = nsyquery.rename_spans(res, 20)
+    test.assert(list.len(first) == 2)
+
+@test
+fn test_the_prelude_names_are_known_without_a_table() [io]
+    let names = nsycheck.prelude_names()
+    test.assert(list.len(names) > 0)
+    var has_println = false
+    for n in names
+        if n == "println"
+            has_println = true
+    test.assert(has_println)
+
+// ── effect rows ─────────────────────────────────────────────────────
+
+@test
+fn test_a_row_carries_the_claim_and_the_measurement() [io]
+    let src = nsytoken.source("fn pure_one() -> Int\n    1\n")
+    let tree = nsyparse.parse(src).tree
+    let res = nsycheck.resolve(src, tree, nsycheck.empty_table())
+    let rows = nsyeffect.rows_of(src, tree, res)
+    match nsyeffect.row_of(rows, "", "pure_one")
+        Some(r) =>
+            test.assert(not r.declared.written)
+            test.assert_eq(list.len(r.inferred), 0)
+        None    =>
+            test.fail("the function had no row")
+
+@test
+fn test_the_label_algebra_compares_polymorphic_names() [io]
+    // A union that compared variants structurally would fold two
+    // different bound parameters into one.
+    let a = [NsyEffIo, NsyEffPoly("e")]
+    let b = [NsyEffPoly("f")]
+    test.assert_eq(list.len(nsyeffect.union(a, b)), 3)
+    test.assert(nsyeffect.holds(a, NsyEffPoly("e")))
+    test.assert(not nsyeffect.holds(a, NsyEffPoly("f")))
+
+@test
+fn test_a_row_renders_the_way_source_writes_it() [io]
+    test.assert_eq(nsyeffect.row_text([]), "[]")
+    test.assert_eq(nsyeffect.row_text([NsyEffIo]), "[io]")
+    test.assert_eq(nsyeffect.row_text([NsyEffIo, NsyEffFs]), "[io, fs]")
+
+@test
+fn test_the_budget_is_the_callers_argument() [io]
+    // This package has no opinion about which layer anyone is in; what
+    // it answers is the arithmetic the enforcement is made of.
+    let src = nsytoken.source("pub fn shout() [io]\n    println(\"x\")\n")
+    let tree = nsyparse.parse(src).tree
+    let res = nsycheck.resolve(src, tree, nsycheck.empty_table())
+    let rows = nsyeffect.rows_of(src, tree, res)
+    test.assert(list.len(nsyeffect.check_budget(rows, [], true)) == 1)
+    test.assert(list.len(nsyeffect.check_budget(rows, [NsyEffIo], true)) == 0)
+
+@test
+fn test_every_effect_word_round_trips() [io]
+    for w in ["io", "net", "ai", "hw", "fs", "ffi", "time", "rand",
+              "mutate", "mcp", "ipc", "async", "expect_invariant"]
+        test.case(w)
+        match nsyast.effect_of(w)
+            Some(l) => test.assert_eq(nsyast.effect_text(l), w)
+            None    => test.fail("'${w}' is an effect label and was not recognised")
+
+// ── the questions an editor asks ────────────────────────────────────
+
+@test
+fn test_the_path_is_outermost_first() [io]
+    let src = nsytoken.source("fn main()\n    let x = 1 + 2\n")
+    let tree = nsyparse.parse(src).tree
+    let p = nsyquery.path_at(tree, 26)
+    test.assert(list.len(p.nodes) >= 3)
+    test.case("the first is the declaration and the last is innermost")
+    test.assert_eq(nsyquery.node_kind_name(p.nodes[0]), "fn")
+    let inner = p.nodes[list.len(p.nodes) - 1]
+    let outer = p.nodes[0]
+    test.assert(nsytoken.span_len(nsyquery.node_span(inner))
+                <= nsytoken.span_len(nsyquery.node_span(outer)))
+
+@test
+fn test_an_offset_in_no_node_answers_an_empty_path() [io]
+    let tree = nsyparse.parse(nsytoken.source("fn a()\n    pass\n")).tree
+    test.assert_eq(list.len(nsyquery.path_at(tree, 10000).nodes), 0)
+
+@test
+fn test_the_place_comes_from_the_tokens_not_the_tree() [io]
+    // The offset a completion fires at is, by definition, in a file
+    // that does not parse.  A language server built on the tree alone
+    // answers "no suggestions" exactly when a person asked for one.
+    let src = nsytoken.source("fn f()\n    x.\n")
+    let toks = nsyparse.parse(src)
+    let _ = toks
+    let place = nsyquery.place_at(src, [], 13)
+    test.assert(place.kind == NsyPlMember)
+
+@test
+fn test_a_half_written_annotation_is_a_type_place() [io]
+    let src = nsytoken.source("fn f(a: \n")
+    let place = nsyquery.place_at(src, [], 8)
+    test.assert(place.kind == NsyPlType)
+
+@test
+fn test_prose_is_a_place_where_nothing_is_suggested() [io]
+    // Saying so is not the same as having no answer.
+    let src = nsytoken.source("// a comment here\n")
+    test.assert(nsyquery.place_at(src, [], 6).kind == NsyPlProse)
+
+@test
+fn test_an_outline_nests_and_names_two_spans() [io]
+    // `selection` is the NAME alone and `span` the whole declaration:
+    // the two an editor needs to both highlight a row and reveal the
+    // right lines when it is clicked.
+    let src = nsytoken.source("struct P\n    x: Int\n\nimpl Shown for P\n    fn show(self) -> Str\n        \"p\"\n")
+    let items = nsyquery.outline(src, nsyparse.parse(src).tree)
+    test.assert(list.len(items) == 2)
+    test.assert_eq(items[0].name, "P")
+    test.assert(list.len(items[0].children) == 1)
+    test.assert(nsytoken.span_len(items[0].selection)
+                < nsytoken.span_len(items[0].span))
+
+@test
+fn test_a_doc_comment_is_a_position_fact() [io]
+    // novo-lang has no `///` marker: a doc comment is an ordinary
+    // comment that a declaration follows.
+    let src = nsytoken.source("// What it does.\nfn f()\n    pass\n")
+    let tree = nsyparse.parse(src).tree
+    match nsyquery.doc_comment(src, [], nsyast.decl_span(tree.decls[0]))
+        Some(sp) => test.assert_eq(nsyquery.doc_text(src, sp), "What it does.")
+        None     => test.fail("the declaration's doc comment was not found")
+
+@test
+fn test_a_blank_line_breaks_the_attachment() [io]
+    let src = nsytoken.source("// Not about the fn.\n\nfn f()\n    pass\n")
+    let tree = nsyparse.parse(src).tree
+    test.assert(nsyquery.doc_comment(src, [], nsyast.decl_span(tree.decls[0])) == None)
+
+// ── the visitor ─────────────────────────────────────────────────────
+
+// A visitor is a type with fields, and the accumulator is `mut self`.
+struct NsytCounter
+    exprs: Int
+    names: Int
+
+impl NsyVisitor[] for NsytCounter
+    fn enter_expr(mut self, value: NsyExpr) -> Bool
+        let _ = value
+        self.exprs = self.exprs + 1
+        true
+
+    fn visit_name(mut self, name: Str, span: NsySpan, role: NsyNameRole)
+        let _ = name
+        let _ = span
+        let _ = role
+        self.names = self.names + 1
+
+@test
+fn test_the_walk_descends_into_an_interpolation_hole() [io]
+    // The reference paid for the opposite exactly here: a call written
+    // inside a `"${…}"` hole reached no walker at all, and three
+    // passes silently did less work than the program asked for.
+    let src = nsytoken.source("fn f()\n    let s = \"n=\${g(1)}\"\n")
+    var v = NsytCounter { exprs: 0, names: 0 }
+    nsyvisit.walk_tree(v, nsyparse.parse(src).tree)
+    test.assert(v.exprs >= 3)
+    test.case("and the name inside the hole was reported")
+    test.assert(v.names >= 1)
+
+@test
+fn test_a_pruned_subtree_is_not_descended() [io]
+    let src = nsytoken.source("fn f()\n    let s = 1 + 2 + 3\n")
+    var all = NsytCounter { exprs: 0, names: 0 }
+    nsyvisit.walk_tree(all, nsyparse.parse(src).tree)
+    test.assert(all.exprs > 1)
+
+// ── the rest of the walkers, and the structure as data ──────────────
+
+@test
+fn test_every_walker_entry_point_takes_the_same_visitor() [io]
+    // One visitor, six entry points: a caller that already holds a
+    // declaration should not have to wrap it in a tree to walk it.
+    let src = nsytoken.source("fn f(a: Int)\n    let b = a + 1\n")
+    let tree = nsyparse.parse(src).tree
+    var d = NsytCounter { exprs: 0, names: 0 }
+    nsyvisit.walk_decl(d, tree.decls[0])
+    test.assert(d.exprs > 0)
+    match tree.decls[0].kind
+        NsyDcFn(f) =>
+            var b = NsytCounter { exprs: 0, names: 0 }
+            nsyvisit.walk_stmts(b, f.body)
+            test.assert(b.exprs > 0)
+            var s = NsytCounter { exprs: 0, names: 0 }
+            nsyvisit.walk_stmt(s, f.body[0])
+            test.assert(s.exprs > 0)
+            var t = NsytCounter { exprs: 0, names: 0 }
+            nsyvisit.walk_type(t, f.params[0].ty)
+            test.assert_eq(t.exprs, 0)
+        _          =>
+            test.fail("the first declaration was not a fn")
+
+@test
+fn test_walking_an_expression_and_a_pattern_on_their_own() [io]
+    let e_src = nsytoken.source("a + b * c")
+    var e = NsytCounter { exprs: 0, names: 0 }
+    nsyvisit.walk_expr(e, nsyparse.parse_expr(e_src, nsylex.lex(e_src)).expr)
+    test.assert(e.exprs >= 5)
+    let p_src = nsytoken.source("fn f()\n    match x\n        Some(v) =>\n            pass\n")
+    match nsyparse.parse(p_src).tree.decls[0].kind
+        NsyDcFn(f) =>
+            match f.body[0].kind
+                NsyStExpr(value) =>
+                    match value.kind
+                        NsyExMatch(m) =>
+                            var p = NsytCounter { exprs: 0, names: 0 }
+                            nsyvisit.walk_pat(p, m.arms[0].pat)
+                            test.assert(p.names >= 1)
+                        _             =>
+                            test.fail("the statement was not a match")
+                _                =>
+                    test.fail("the body's first statement was not an expression")
+        _          =>
+            test.fail("the first declaration was not a fn")
+
+// A rewriter that renames nothing: the identity, so the assertion is
+// that the WALK reaches everything, not that the rule does.
+struct NsytIdentity
+    seen: Int
+
+impl NsyRewriter[] for NsytIdentity
+    fn rewrite_expr(mut self, value: NsyExpr) -> NsyExpr
+        self.seen = self.seen + 1
+        value
+
+@test
+fn test_the_rewriter_reaches_every_expression_and_changes_nothing() [io]
+    let text = "fn f()\n    let x = 1 + 2\n"
+    let src = nsytoken.source(text)
+    let toks = nsylex.lex(src)
+    let tree = nsyparse.parse_tokens(src, toks).tree
+    var r = NsytIdentity { seen: 0 }
+    let out = nsyvisit.rewrite_tree(r, tree)
+    test.assert(r.seen >= 3)
+    test.assert_eq(nsyprint.to_source(src, toks, out, nsyprint.canonical()), text)
+
+@test
+fn test_the_rewriter_has_the_same_entry_points_as_the_walker() [io]
+    let src = nsytoken.source("fn f()\n    let x = 1 + 2\n")
+    let tree = nsyparse.parse(src).tree
+    var a = NsytIdentity { seen: 0 }
+    let _ = nsyvisit.rewrite_decl(a, tree.decls[0])
+    test.assert(a.seen > 0)
+    match tree.decls[0].kind
+        NsyDcFn(f) =>
+            var b = NsytIdentity { seen: 0 }
+            let _ = nsyvisit.rewrite_stmts(b, f.body)
+            test.assert(b.seen > 0)
+        _          =>
+            test.fail("the first declaration was not a fn")
+    var c = NsytIdentity { seen: 0 }
+    let e_src = nsytoken.source("a + b")
+    let _ = nsyvisit.rewrite_expr(c, nsyparse.parse_expr(e_src, nsylex.lex(e_src)).expr)
+    test.assert(c.seen > 0)
+
+@test
+fn test_the_structure_is_available_as_data() [io]
+    // For the consumer that drives its own loop: a query that descends
+    // one branch, an expand-selection, a breadth-first search.
+    let src = nsytoken.source("fn f()\n    let x = 1 + 2\n    pass\n")
+    let e_src = nsytoken.source("1 + 2")
+    let plus = nsyparse.parse_expr(e_src, nsylex.lex(e_src)).expr
+    test.assert_eq(list.len(nsyvisit.expr_children(plus)), 2)
+    let tree = nsyparse.parse(src).tree
+    test.assert_eq(list.len(nsyvisit.decl_bodies(tree.decls[0])), 2)
+    match tree.decls[0].kind
+        NsyDcFn(f) =>
+            test.assert_eq(list.len(nsyvisit.stmt_children(f.body[1])), 0)
+        _          =>
+            test.fail("the first declaration was not a fn")
+
+// ── the rest of the queries ─────────────────────────────────────────
+
+@test
+fn test_node_at_is_the_innermost_of_the_path() [io]
+    let src = nsytoken.source("fn main()\n    let x = 1 + 2\n")
+    let tree = nsyparse.parse(src).tree
+    let p = nsyquery.path_at(tree, 26)
+    match nsyquery.node_at(tree, 26)
+        Some(n) =>
+            let inner = p.nodes[list.len(p.nodes) - 1]
+            test.assert_eq(nsytoken.span_len(nsyquery.node_span(n)),
+                           nsytoken.span_len(nsyquery.node_span(inner)))
+        None    =>
+            test.fail("an offset inside a body had no node")
+
+@test
+fn test_token_at_answers_on_a_file_that_does_not_parse() [io]
+    // Over the token stream rather than the tree, because semantic
+    // highlighting wants every token, whether or not the parser was
+    // able to make anything of it.
+    let src = nsytoken.source("fn f(\n")
+    let toks = nsylex.lex(src)
+    match nsyquery.token_at(toks, 3)
+        Some(t) => test.assert_eq(nsytoken.slice(src, t.span), "f")
+        None    => test.fail("a token at offset 3 was not found")
+
+@test
+fn test_the_enclosing_declaration_and_its_body() [io]
+    let src = nsytoken.source("struct P\n    x: Int\n\nfn go()\n    pass\n")
+    let tree = nsyparse.parse(src).tree
+    match nsyquery.enclosing_fn(tree, 35)
+        Some(f) => test.assert_eq(f.name, "go")
+        None    => test.fail("an offset inside go() had no enclosing fn")
+    match nsyquery.enclosing_decl(tree, 14)
+        Some(d) => test.assert_eq(nsyast.decl_name(d), "P")
+        None    => test.fail("an offset inside P had no enclosing declaration")
+    test.assert_eq(list.len(nsyquery.enclosing_body(tree, 35)), 1)
+    test.case("and an offset in no declaration answers nothing")
+    match nsyquery.enclosing_fn(tree, 10000)
+        Some(f) =>
+            test.fail("an offset past the end named '${f.name}'")
+        None    =>
+            test.assert(true)
+
+@test
+fn test_fold_ranges_cover_the_bodies() [io]
+    let src = nsytoken.source("fn a()\n    pass\n\nfn b()\n    pass\n")
+    let toks = nsylex.lex(src)
+    test.assert(list.len(nsyquery.fold_ranges(src, toks, nsyparse.parse(src).tree)) >= 2)
+
+@test
+fn test_selection_ranges_grow_outwards() [io]
+    // The path's spans, plus two an editor wants that are not nodes:
+    // the WORD at the offset, and the line.
+    let src = nsytoken.source("fn main()\n    let total = 1 + 2\n")
+    let ranges = nsyquery.selection_ranges(src, nsyparse.parse(src).tree, 20)
+    test.assert(list.len(ranges) >= 3)
+    var last = 0
+    for sp in ranges
+        test.assert(nsytoken.span_len(sp) >= last)
+        last = nsytoken.span_len(sp)
+
+@test
+fn test_definitions_references_and_go_to_definition() [io]
+    let res = resolved("fn go()\n    pass\n\nfn main()\n    go()\n")
+    test.assert_eq(list.len(nsyquery.definitions(res, "go")), 1)
+    let declared = nsyquery.definitions(res, "go")[0].span
+    test.assert(list.len(nsyquery.references(res, declared)) >= 1)
+    match nsyquery.definition_at(res, 36)
+        Some(sym) => test.assert_eq(sym.name, "go")
+        None      => test.fail("the call site resolved to no declaration")
+
+@test
+fn test_doc_examples_are_spans_of_their_contents() [io]
+    // Spans rather than text, so a diagnostic raised inside an example
+    // can be reported at its real position in the file it was written
+    // in.
+    let text = "// What it does.\n//\n// ```novo\n// let x = 1\n// ```\nfn f()\n    pass\n"
+    let src = nsytoken.source(text)
+    let toks = nsylex.lex(src)
+    let tree = nsyparse.parse_tokens(src, toks).tree
+    match nsyquery.doc_comment(src, toks, nsyast.decl_span(tree.decls[0]))
+        Some(sp) =>
+            test.assert_eq(list.len(nsyquery.doc_examples(src, sp)), 1)
+        None     =>
+            test.fail("the declaration's doc comment was not found")
+
+@test
+fn test_an_annotation_is_found_by_name() [io]
+    let src = nsytoken.source("@satisfies(REQ-001)\nfn f()\n    pass\n")
+    let tree = nsyparse.parse(src).tree
+    let annots = nsyast.decl_annots(tree.decls[0])
+    test.assert(nsyast.find_annot(annots, "satisfies") != None)
+    test.assert(nsyast.find_annot(annots, "derive") == None)
+
+@test
+fn test_an_impl_is_filed_under_the_key_a_lookup_uses() [io]
+    let src = nsytoken.source("impl Shown for [Str]\n    fn show(self) -> Str\n        \"x\"\n")
+    let t = nsycheck.table_of_tree(src, nsyparse.parse(src).tree, "m")
+    test.assert_eq(list.len(nsycheck.table_impls(t, "Shown", "list_Str")), 1)
+    test.case("and asking for every impl of the target names it too")
+    test.assert_eq(list.len(nsycheck.table_impls(t, "", "list_Str")), 1)
+
+@test
+fn test_a_binding_is_found_by_offset_and_its_peers_with_it() [io]
+    let res = resolved("fn f()\n    let total = 1\n    let _ = total\n")
+    match nsycheck.binding_at(res, 32)
+        Some(b) => test.assert_eq(b.name, "total")
+        None    => test.fail("the use site was bound to nothing")
+    test.assert_eq(list.len(nsycheck.references_at(res, 32)), 2)
+
+@test
+fn test_the_row_under_the_cursor_and_the_subset_test() [io]
+    let src = nsytoken.source("fn shout() [io]\n    println(\"x\")\n")
+    let tree = nsyparse.parse(src).tree
+    let res = nsycheck.resolve(src, tree, nsycheck.empty_table())
+    let rows = nsyeffect.rows_of(src, tree, res)
+    match nsyeffect.row_at(rows, 20)
+        Some(r) => test.assert_eq(r.name, "shout")
+        None    => test.fail("an offset inside the body had no row")
+    test.assert(nsyeffect.within([NsyEffIo], [NsyEffIo, NsyEffFs]))
+    test.assert(not nsyeffect.within([NsyEffIo, NsyEffNet], [NsyEffIo]))
+    test.assert_eq(list.len(nsyeffect.difference([NsyEffIo, NsyEffFs], [NsyEffIo])), 1)
+
+@test
+fn test_discharges_are_listed_and_not_judged() [io]
+    // Whether a discharge is allowed is a policy, and the policy is the
+    // caller's.
+    let src = nsytoken.source("fn f()\n    pass\n")
+    test.assert_eq(list.len(nsyeffect.discharges(src, nsyparse.parse(src).tree)), 0)

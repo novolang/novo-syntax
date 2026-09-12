@@ -1,0 +1,293 @@
+// nsytoken_tests.nv — spans, the reserved table, punctuation, trivia.
+//
+// RED UNTIL THE BODIES LAND.  Every function these call is a `todo()`
+// today, so the suite panics on its first assertion; that is the
+// interface-package contract, and what these files are for now is to
+// say exactly what the implementation has to answer.
+//
+// The vectors are the reference front end's own.  The reserved-word
+// table is `compiler/lib/lexer.mll`'s keyword table, word for word, and
+// the punctuation table is its operator rules in longest-match order —
+// so a spelling that drifts from the compiler's is a red assertion
+// here rather than a divergence found by a corpus run.
+//
+//   novo test --llvm tests/nsytoken_tests.nv     (from orbit/novo-syntax)
+
+use std.str
+use std.list
+use std.test
+use nsytoken
+
+@test
+fn test_a_span_is_half_open() [io]
+    let sp = NsySpan { start: 4, stop: 9 }
+    test.assert_eq(nsytoken.span_len(sp), 5)
+    test.case("start is inside and stop is not")
+    test.assert(nsytoken.span_holds(sp, 4))
+    test.assert(nsytoken.span_holds(sp, 8))
+    test.assert(not nsytoken.span_holds(sp, 9))
+    test.assert(not nsytoken.span_holds(sp, 3))
+
+@test
+fn test_an_empty_span_holds_nothing() [io]
+    // Every synthesised layout token has one, and a consumer that
+    // treated a zero-width span as containing its own offset would
+    // find an INDENT under the cursor everywhere a block opens.
+    let sp = NsySpan { start: 7, stop: 7 }
+    test.assert_eq(nsytoken.span_len(sp), 0)
+    test.assert(not nsytoken.span_holds(sp, 7))
+
+@test
+fn test_span_join_covers_both() [io]
+    let a = NsySpan { start: 10, stop: 14 }
+    let b = NsySpan { start: 20, stop: 22 }
+    let j = nsytoken.span_join(a, b)
+    test.assert_eq(j.start, 10)
+    test.assert_eq(j.stop, 22)
+    test.case("and the order of the arguments does not matter")
+    let k = nsytoken.span_join(b, a)
+    test.assert_eq(k.start, 10)
+    test.assert_eq(k.stop, 22)
+
+@test
+fn test_the_line_table_counts_from_one_and_zero() [io]
+    // Line is 1-based and column is a 0-based BYTE offset, which is the
+    // reference's `pos_cnum - pos_bol`.  A package that used 0-based
+    // lines would report every diagnostic one line above the compiler.
+    let src = nsytoken.source("fn main()\n    pass\n")
+    let a = nsytoken.line_col(src, 0)
+    test.assert_eq(a.line, 1)
+    test.assert_eq(a.col, 0)
+    let b = nsytoken.line_col(src, 14)
+    test.assert_eq(b.line, 2)
+    test.assert_eq(b.col, 4)
+
+@test
+fn test_offset_at_is_the_inverse_and_refuses_what_is_not_there() [io]
+    let src = nsytoken.source("ab\ncd\n")
+    test.assert_eq(nsytoken.offset_at(src, NsyLineCol { line: 2, col: 1 }), Some(4))
+    test.case("a line that does not exist is None, not a clamp")
+    test.assert(nsytoken.offset_at(src, NsyLineCol { line: 9, col: 0 }) == None)
+    test.case("and a column past the end of its line is None too")
+    test.assert(nsytoken.offset_at(src, NsyLineCol { line: 1, col: 40 }) == None)
+
+@test
+fn test_slice_answers_the_bytes() [io]
+    let src = nsytoken.source("let total = 1\n")
+    test.assert_eq(nsytoken.slice(src, NsySpan { start: 4, stop: 9 }), "total")
+
+@test
+fn test_every_reserved_word_is_in_the_table() [io]
+    // `compiler/lib/lexer.mll`'s keyword table.  `frame` is NOT here —
+    // it is contextual, reaches the parser as an identifier, and is
+    // recognised there by spelling.
+    for w in ["alias", "and", "as", "asm", "async", "await", "break",
+              "bsp", "const", "continue", "dyn", "elif", "else", "enum",
+              "error_kind", "false", "fn", "for", "if", "impl", "in",
+              "let", "loop", "match", "memory_map", "mut", "not",
+              "null", "or", "pass", "peripheral", "prompt", "pub",
+              "register", "return", "self", "state_machine", "static",
+              "struct", "system", "then", "trait", "true", "type", "_",
+              "unsafe_discharge", "use", "var", "vector_table", "weak",
+              "while"]
+        test.case(w)
+        match nsytoken.keyword_of(w)
+            Some(k) => test.assert_eq(nsytoken.keyword_text(k), w)
+            None    => test.fail("'${w}' is a reserved word and the table did not have it")
+
+@test
+fn test_frame_is_not_reserved() [io]
+    test.assert(nsytoken.keyword_of("frame") == None)
+
+@test
+fn test_an_ordinary_word_is_not_a_keyword() [io]
+    for w in ["main", "_foo", "a_b", "iffy", "matches", "selfish"]
+        test.case(w)
+        test.assert(nsytoken.keyword_of(w) == None)
+
+@test
+fn test_a_lone_underscore_is_its_own_token() [io]
+    // Decided on the WHOLE lexeme, exactly as the reference decides it
+    // inside `ident_or_kw` — which is what keeps `_foo` and `a_b`
+    // untouched.
+    test.assert(nsytoken.keyword_of("_") == Some(NsyKwUnderscore))
+    test.assert_eq(nsytoken.keyword_text(NsyKwUnderscore), "_")
+
+@test
+fn test_the_block_openers_are_the_reference_set() [io]
+    for k in [NsyKwFn, NsyKwLoop, NsyKwSystem, NsyKwUnsafeDischarge,
+              NsyKwIf, NsyKwElif, NsyKwFor, NsyKwWhile, NsyKwMatch]
+        test.assert(nsytoken.keyword_opens_block(k))
+    test.case("and these are not, whatever they do elsewhere on a line")
+    for k in [NsyKwElse, NsyKwThen, NsyKwLet, NsyKwReturn, NsyKwPub]
+        test.assert(not nsytoken.keyword_opens_block(k))
+
+@test
+fn test_punctuation_spellings() [io]
+    // Longest match first, which is the order the lexer resolves them.
+    test.assert_eq(nsytoken.punct_text(NsyPuShr3Eq), ">>>=")
+    test.assert_eq(nsytoken.punct_text(NsyPuDotDotDot), "...")
+    test.assert_eq(nsytoken.punct_text(NsyPuDotDotEq), "..=")
+    test.assert_eq(nsytoken.punct_text(NsyPuShlEq), "<<=")
+    test.assert_eq(nsytoken.punct_text(NsyPuShr3), ">>>")
+    test.assert_eq(nsytoken.punct_text(NsyPuPipe), "|>")
+    test.assert_eq(nsytoken.punct_text(NsyPuPipeChar), "|")
+    test.assert_eq(nsytoken.punct_text(NsyPuSafeDot), "?.")
+    test.assert_eq(nsytoken.punct_text(NsyPuNullCoal), "??")
+    test.assert_eq(nsytoken.punct_text(NsyPuFatArrow), "=>")
+    test.assert_eq(nsytoken.punct_text(NsyPuArrow), "->")
+
+@test
+fn test_brackets_pair_up() [io]
+    test.assert(nsytoken.punct_opens(NsyPuLParen) == Some(NsyPuRParen))
+    test.assert(nsytoken.punct_opens(NsyPuLBracket) == Some(NsyPuRBracket))
+    test.assert(nsytoken.punct_opens(NsyPuLBrace) == Some(NsyPuRBrace))
+    test.case("and a closer opens nothing")
+    test.assert(nsytoken.punct_opens(NsyPuRParen) == None)
+    test.assert(nsytoken.punct_closes(NsyPuRParen))
+    test.assert(not nsytoken.punct_closes(NsyPuLParen))
+
+@test
+fn test_the_continuation_set_is_smaller_than_the_operator_set() [io]
+    // The reference's `count_indent` table.  `->` and the `..` family
+    // are in it, so a wrapped signature parses.
+    for p in [NsyPuArrow, NsyPuDotDot, NsyPuDotDotEq, NsyPuDotDotDot,
+              NsyPuPlus, NsyPuMinus, NsyPuStar, NsyPuSlash, NsyPuEqEq,
+              NsyPuNeq, NsyPuLeq, NsyPuGeq, NsyPuPipe]
+        test.assert(nsytoken.punct_continues_line(p))
+    test.case("and these never continue a line")
+    for p in [NsyPuFatArrow, NsyPuAssign, NsyPuBang, NsyPuQuestion,
+              NsyPuColon, NsyPuAt, NsyPuPipeChar, NsyPuLParen,
+              NsyPuRParen, NsyPuLBracket, NsyPuRBracket, NsyPuLBrace,
+              NsyPuRBrace]
+        test.assert(not nsytoken.punct_continues_line(p))
+
+@test
+fn test_trivia_and_layout_are_told_apart() [io]
+    let comment = NsyToken { kind: NsyTkTrivia(NsyTrLineComment),
+                             span: NsySpan { start: 0, stop: 5 } }
+    let indent = NsyToken { kind: NsyTkIndent,
+                            span: NsySpan { start: 5, stop: 5 } }
+    let word = NsyToken { kind: NsyTkIdent,
+                          span: NsySpan { start: 6, stop: 9 } }
+    test.assert(nsytoken.is_trivia(comment))
+    test.assert(not nsytoken.is_trivia(indent))
+    test.assert(not nsytoken.is_trivia(word))
+    test.assert(nsytoken.is_layout(indent))
+    test.assert(not nsytoken.is_layout(comment))
+    test.assert(not nsytoken.is_layout(word))
+
+@test
+fn test_all_three_comment_spellings_can_document() [io]
+    // The scanner `novo fmt` uses today has to know all three or it
+    // deletes the ones it does not.  Here they are, as a table.
+    test.assert(nsytoken.trivia_can_document(NsyTrLineComment))
+    test.assert(nsytoken.trivia_can_document(NsyTrHashComment))
+    test.assert(nsytoken.trivia_can_document(NsyTrBlockComment))
+    test.case("a blank-line run documents nothing")
+    test.assert(not nsytoken.trivia_can_document(NsyTrBlankLines))
+
+@test
+fn test_kind_names_are_the_compilers_own() [io]
+    // These are what `novo parse --tokens` prints, which is what lets a
+    // corpus check compare the two streams with no translation.
+    test.assert_eq(nsytoken.kind_name(NsyTkIdent), "IDENT")
+    test.assert_eq(nsytoken.kind_name(NsyTkNewline), "NEWLINE")
+    test.assert_eq(nsytoken.kind_name(NsyTkIndent), "INDENT")
+    test.assert_eq(nsytoken.kind_name(NsyTkDedent), "DEDENT")
+    test.assert_eq(nsytoken.kind_name(NsyTkEof), "EOF")
+    test.assert_eq(nsytoken.kind_name(NsyTkIntMin), "INTMINLIT")
+    test.assert_eq(nsytoken.kind_name(NsyTkKeyword(NsyKwMatch)), "MATCH")
+    test.assert_eq(nsytoken.kind_name(NsyTkPunct(NsyPuLParen)), "LPAREN")
+
+@test
+fn test_without_trivia_leaves_the_reference_stream() [io]
+    let toks = [NsyToken { kind: NsyTkTrivia(NsyTrLineComment),
+                           span: NsySpan { start: 0, stop: 5 } },
+                NsyToken { kind: NsyTkIdent,
+                           span: NsySpan { start: 6, stop: 7 } },
+                NsyToken { kind: NsyTkTrivia(NsyTrBlankLines),
+                           span: NsySpan { start: 8, stop: 10 } },
+                NsyToken { kind: NsyTkEof,
+                           span: NsySpan { start: 10, stop: 10 } }]
+    test.assert_eq(list.len(nsytoken.without_trivia(toks)), 2)
+
+@test
+fn test_index_at_finds_the_token_starting_at_or_before() [io]
+    let toks = [NsyToken { kind: NsyTkIdent, span: NsySpan { start: 0, stop: 3 } },
+                NsyToken { kind: NsyTkIdent, span: NsySpan { start: 4, stop: 9 } },
+                NsyToken { kind: NsyTkEof, span: NsySpan { start: 9, stop: 9 } }]
+    test.assert_eq(nsytoken.index_at(toks, 0), Some(0))
+    test.assert_eq(nsytoken.index_at(toks, 2), Some(0))
+    test.assert_eq(nsytoken.index_at(toks, 4), Some(1))
+    test.assert_eq(nsytoken.index_at(toks, 100), Some(2))
+    test.case("and an empty stream has no answer")
+    let empty: [NsyToken] = []
+    test.assert(nsytoken.index_at(empty, 0) == None)
+
+@test
+fn test_every_fault_has_a_message() [io]
+    for k in [NsyFtUnexpectedByte, NsyFtUnterminatedStr,
+              NsyFtUnterminatedChar, NsyFtUnterminatedComment,
+              NsyFtUnknownEscape, NsyFtIncompleteUnicode,
+              NsyFtBadUnicodeDigits, NsyFtUnicodeOutOfRange,
+              NsyFtUnicodeSurrogate, NsyFtUnicodeNotAscii,
+              NsyFtBackslashInHole, NsyFtUnterminatedHole,
+              NsyFtIntOutOfRange, NsyFtMalformedNumber,
+              NsyFtUnbalancedBracket, NsyFtInconsistentIndent,
+              NsyFtTabInIndent]
+        test.assert(nsytoken.fault_message(k) != "")
+
+@test
+fn test_a_line_span_stops_before_its_terminator() [io]
+    let src = nsytoken.source("ab\ncdef\n")
+    match nsytoken.line_span(src, 2)
+        Some(sp) => test.assert_eq(nsytoken.slice(src, sp), "cdef")
+        None     => test.fail("line 2 exists and had no span")
+    test.case("and a line that does not exist has none")
+    test.assert(nsytoken.line_span(src, 9) == None)
+
+@test
+fn test_is_fault_finds_the_fault_token() [io]
+    let bad = NsyToken { kind: NsyTkFault(NsyFtUnknownEscape),
+                         span: NsySpan { start: 3, stop: 5 } }
+    let ok = NsyToken { kind: NsyTkIdent, span: NsySpan { start: 0, stop: 2 } }
+    test.assert(nsytoken.is_fault(bad))
+    test.assert(not nsytoken.is_fault(ok))
+
+@test
+fn test_unescape_writes_into_the_callers_buffer() [io]
+    // Into a buffer rather than answering a Str, because a caller
+    // assembling a literal out of its segments would otherwise allocate
+    // one string per segment and throw all but the last away.
+    let src = nsytoken.source("a\\nb\\tc")
+    let buf = str.builder_new()
+    test.assert(nsytoken.unescape_into(buf, src, NsySpan { start: 0, stop: 8 }) == None)
+    let out = str.builder_to_str(buf)
+    str.builder_drop(buf)
+    test.assert_eq(out, "a\nb\tc")
+
+@test
+fn test_escape_into_writes_the_shortest_escape() [io]
+    let buf = str.builder_new()
+    nsytoken.escape_into(buf, "a\nb\"c\\d")
+    let out = str.builder_to_str(buf)
+    str.builder_drop(buf)
+    test.assert_eq(out, "a\\nb\\\"c\\\\d")
+
+@test
+fn test_str_value_refuses_an_interpolated_literal() [io]
+    // An interpolated string has no value until its holes are
+    // evaluated, and answering the literal parts with the holes
+    // silently dropped is the mistake this signature exists to refuse.
+    let plain = NsyToken { kind: NsyTkStr(NsyStrPlain, [NsySegLit(NsySpan { start: 1, stop: 3 })]),
+                           span: NsySpan { start: 0, stop: 4 } }
+    let src = nsytoken.source("\"ab\"")
+    test.assert(nsytoken.str_value(src, plain) == Some("ab"))
+    test.case("and a hole makes the answer None")
+    let holed = NsyToken { kind: NsyTkStr(NsyStrPlain, [NsySegHole(NsySpan { start: 1, stop: 3 }, [])]),
+                           span: NsySpan { start: 0, stop: 6 } }
+    test.assert(nsytoken.str_value(src, holed) == None)
+    test.case("and a token that is not a string is None too")
+    let word = NsyToken { kind: NsyTkIdent, span: NsySpan { start: 0, stop: 2 } }
+    test.assert(nsytoken.str_value(src, word) == None)

@@ -1,0 +1,257 @@
+// nsyquery.nv — the questions an editor asks.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A PATH, NOT A NODE, and that is the decision this module is built
+// on.  "What is at offset 4021" is almost never the question: an
+// editor asking for a hover wants the innermost node AND the function
+// it is in, "expand selection" walks outwards a node at a time,
+// completion needs to know whether the enclosing node is a type
+// annotation or an expression, and a code action needs the declaration
+// to rewrite.  A query that answered only the innermost node would
+// make each of those a second traversal, and the one after that a
+// third.  `path_at` answers the whole chain from the file down, once.
+//
+// AND THE PLACE COMES FROM THE TOKENS, NOT THE TREE.  The offset a
+// completion fires at is, almost by definition, in a file that does
+// not parse — `x.` is not an expression, and `fn f(a: ` is not a
+// declaration.  The tree at that offset is an error node, and an error
+// node cannot say whether a type or an expression was being written.
+// So `place_at` reads the TOKENS around the offset and answers from
+// them; the tree is what the other queries use.  A language server
+// built on the tree alone answers "no suggestions" exactly when a
+// person has asked for one.
+//
+// NO EFFECTS.
+
+use std.list
+use nsytoken
+use nsycheck
+
+// A node of any category, so that one path can hold all of them.
+pub enum NsyNode
+    NsyNdDecl(decl: NsyDecl)
+    NsyNdStmt(stmt: NsyStmt)
+    NsyNdExpr(value: NsyExpr)
+    NsyNdPat(pat: NsyPat)
+    NsyNdType(ty: NsyType)
+    NsyNdAnnot(annot: NsyAnnot)
+    NsyNdLit(lit: NsyLit)
+
+// The span of any node.
+pub fn node_span(node: NsyNode) -> NsySpan
+    todo("novo-syntax.nsyquery.node_span")
+
+// A short kind word for a node — what an editor labels a breadcrumb
+// with.
+pub fn node_kind_name(node: NsyNode) -> Str
+    todo("novo-syntax.nsyquery.node_kind_name")
+
+// The chain of nodes containing an offset, OUTERMOST FIRST.
+//
+// `nodes[0]` is the declaration the offset is in and the last element
+// is the innermost node containing it.  An empty path means the offset
+// is in no node — between two declarations, inside trivia, past the
+// end of the file.
+pub struct NsyPath
+    nodes: [NsyNode]
+
+// The path to an offset.
+//
+// ```novo
+// use nsytoken
+// use nsyparse
+// use nsyquery
+//
+// fn main() [io]
+//     let s = nsytoken.source("fn main()\n    pass\n")
+//     let r = nsyparse.parse(s)
+//     println("${list.len(nsyquery.path_at(r.tree, 3).nodes)}")
+// ```
+pub fn path_at(tree: NsyTree, offset: Int) -> NsyPath
+    todo("novo-syntax.nsyquery.path_at")
+
+// The innermost node containing an offset.
+pub fn node_at(tree: NsyTree, offset: Int) -> ?NsyNode
+    todo("novo-syntax.nsyquery.node_at")
+
+// The token at an offset, trivia included.
+//
+// Over the TOKEN stream rather than the tree, and separate from
+// `node_at` for the reason the header gives: the token is there on a
+// file that does not parse, and semantic highlighting wants every
+// token whether or not the parser could use it.
+pub fn token_at(toks: [NsyToken], offset: Int) -> ?NsyToken
+    todo("novo-syntax.nsyquery.token_at")
+
+// The function declaration containing an offset.
+pub fn enclosing_fn(tree: NsyTree, offset: Int) -> ?NsyFn
+    todo("novo-syntax.nsyquery.enclosing_fn")
+
+// The declaration containing an offset — a `fn`, a `struct`, an
+// `impl`.  An `impl`'s method answers the method's `fn`; use
+// `path_at` when the enclosing `impl` is what is wanted.
+pub fn enclosing_decl(tree: NsyTree, offset: Int) -> ?NsyDecl
+    todo("novo-syntax.nsyquery.enclosing_decl")
+
+// The statement block containing an offset, as its statements.
+pub fn enclosing_body(tree: NsyTree, offset: Int) -> [NsyStmt]
+    todo("novo-syntax.nsyquery.enclosing_body")
+
+// ── what kind of place is this ──────────────────────────────────────
+
+// What the grammar admits at an offset.
+//
+// Answered from the TOKENS, so it is right on a file mid-edit — which
+// is the only kind of file it is ever asked about.
+pub enum NsyPlaceKind
+    // A value: after `=`, inside a call's arguments, on either side of
+    // an operator.
+    NsyPlExpr
+    // A type: after a `:` in a parameter or field, after `->`, inside
+    // `<…>`.
+    NsyPlType
+    // A pattern: after `match`'s INDENT, after `for`, after `let` and
+    // `var` before the `=`.
+    NsyPlPattern
+    // After a `.` or `?.` — the member of a receiver.  The receiver's
+    // span is on the place.
+    NsyPlMember
+    // At the start of a line at declaration level: `fn`, `struct`,
+    // `pub`, `use`.
+    NsyPlDeclaration
+    // After an `@`.
+    NsyPlAnnotation
+    // Inside a `use` path.
+    NsyPlUsePath
+    // Inside an effect clause's brackets.
+    NsyPlEffectLabel
+    // Inside a `${…}` in a string literal, which is an expression
+    // place inside a token that is not one — and the reason a
+    // completion has to consult the segment structure rather than the
+    // token kind.
+    NsyPlStrHole
+    // Inside a comment or a string's literal text: nothing is
+    // suggested, and saying so is not the same as having no answer.
+    NsyPlProse
+
+// What can be written at an offset, and what it would attach to.
+//
+// `receiver` is the span of the expression before a `.`, empty
+// elsewhere; it is what a member completion needs in order to ask
+// `nsycheck` for the receiver's type.
+pub struct NsyPlace
+    kind: NsyPlaceKind
+    receiver: NsySpan
+    // The partial word already typed at the offset, which a caller
+    // filters its suggestions by.  Empty when the offset is not inside
+    // a word.
+    prefix: Str
+
+// The place an offset is in.
+//
+// ```novo
+// use nsytoken
+// use nsylex
+// use nsyquery
+//
+// fn main() [io]
+//     let s = nsytoken.source("let x = 1\n")
+//     println("${list.len(nsylex.lex(s))}")
+// ```
+pub fn place_at(src: NsySource, toks: [NsyToken], offset: Int) -> NsyPlace
+    todo("novo-syntax.nsyquery.place_at")
+
+// ── the file, summarised ────────────────────────────────────────────
+
+// One entry of a document outline.
+//
+// `children` nests, so an `impl`'s methods hang under it and a struct's
+// fields under the struct.  `selection` is the span of the NAME alone
+// and `span` the whole declaration — the two an editor needs to both
+// highlight a row and reveal the right lines when it is clicked.
+pub struct NsyOutlineItem
+    name: Str
+    kind: NsySymKind
+    span: NsySpan
+    selection: NsySpan
+    detail: Str
+    children: [NsyOutlineItem]
+
+// The outline of a file.
+pub fn outline(src: NsySource, tree: NsyTree) -> [NsyOutlineItem]
+    todo("novo-syntax.nsyquery.outline")
+
+// The spans an editor can fold: every body, every `match`, every
+// bracketed run that spans lines, and every run of three or more
+// comment lines.
+pub fn fold_ranges(src: NsySource, toks: [NsyToken], tree: NsyTree) -> [NsySpan]
+    todo("novo-syntax.nsyquery.fold_ranges")
+
+// The spans "expand selection" walks through at an offset, innermost
+// first.
+//
+// The path's spans, plus two an editor wants that are not nodes: the
+// WORD at the offset, and the line.
+pub fn selection_ranges(src: NsySource, tree: NsyTree, offset: Int) -> [NsySpan]
+    todo("novo-syntax.nsyquery.selection_ranges")
+
+// ── names ───────────────────────────────────────────────────────────
+
+// Every declaration of a name in a resolved file.
+pub fn definitions(res: NsyResolution, name: Str) -> [NsySymbol]
+    todo("novo-syntax.nsyquery.definitions")
+
+// Every occurrence bound to a given declaration, by the declaration's
+// own span.
+//
+// Keyed by the DECLARATION's span rather than by the name, for the
+// reason `nsycheck.references_at` gives: two `x`es in two functions
+// are two answers, and a rename that matched on the name would edit
+// both.
+pub fn references(res: NsyResolution, declared_at: NsySpan) -> [NsyBinding]
+    todo("novo-syntax.nsyquery.references")
+
+// The declaration an offset refers to — go-to-definition.
+pub fn definition_at(res: NsyResolution, offset: Int) -> ?NsySymbol
+    todo("novo-syntax.nsyquery.definition_at")
+
+// Every span a rename at `offset` has to edit, the declaration
+// included, in source order.
+//
+// One list and not two, because a rename that edited the references
+// and forgot the declaration leaves a file that does not compile, and
+// a caller assembling the list itself is a caller that can make that
+// mistake.  Empty when the offset is on nothing renameable — a
+// keyword, a literal, a name from another module whose source this
+// file does not have.
+pub fn rename_spans(res: NsyResolution, offset: Int) -> [NsySpan]
+    todo("novo-syntax.nsyquery.rename_spans")
+
+// ── doc comments ────────────────────────────────────────────────────
+
+// The doc comment attached to a declaration, as a span, or `None`.
+//
+// A POSITION FACT, because novo-lang has no `///` marker: a doc
+// comment is an ordinary comment that a declaration follows.  The rule
+// is the one `novo doc` already applies — the unbroken run of `//`
+// lines immediately above the declaration, annotations included, with
+// no blank line between the run and what it documents.
+//
+// Needs the token stream, because the parser does not thread trivia.
+pub fn doc_comment(src: NsySource, toks: [NsyToken], span: NsySpan) -> ?NsySpan
+    todo("novo-syntax.nsyquery.doc_comment")
+
+// The doc comment's text with the `//` markers and one leading space
+// stripped from each line — what a hover renders.
+pub fn doc_text(src: NsySource, sp: NsySpan) -> Str
+    todo("novo-syntax.nsyquery.doc_text")
+
+// The example blocks in a doc comment, as spans of their CONTENTS.
+//
+// A doctest's source, which `novo doc` compiles and a package audit
+// counts.  Spans rather than text, so a diagnostic raised inside an
+// example can be reported at its real position in the file it was
+// written in.
+pub fn doc_examples(src: NsySource, sp: NsySpan) -> [NsySpan]
+    todo("novo-syntax.nsyquery.doc_examples")

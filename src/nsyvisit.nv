@@ -1,0 +1,252 @@
+// nsyvisit.nv — walking the tree, and rewriting it.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A TRAIT, NOT A STRUCT OF FN FIELDS, and the question is worth
+// answering in full because both shapes are ordinary and only one of
+// them is available here.
+//
+// A struct of function fields is a VALUE holding function pointers.
+// At `@tier(embedded)` a lambda that becomes a value is refused, so
+// the shape survives only if every field is filled with a named
+// function — and nothing in the type says so, which means the
+// restriction is a convention a caller discovers by having a device
+// build fail.  A trait has no value: each impl's methods are named
+// functions, monomorphised at the call, and the walker below binds the
+// impl statically.  The device question never arises.
+//
+// The trait also buys the thing a struct of fields cannot have: an
+// EFFECT PARAMETER.  `trait NsyVisitor[e]` and
+// `fn walk_tree<V: NsyVisitor[e]>(v: V, t: NsyTree) [e]` is the
+// effect-polymorphic shape of `docs/publishing.md` § How a `core`
+// package takes a stream from its host — the walk is written once, in
+// here, at `[]`, and costs whatever the visitor costs.  A language
+// server's visitor that writes diagnostics is `[io]` and pays `[io]`;
+// a counter is `[]` and pays nothing.  This is the ONLY place in
+// novo-syntax where a caller's effects flow through, and it is the
+// only place where anything needs to.
+//
+// AND THE ACCUMULATOR IS `mut self`.  A separate fold threading a
+// value would need a type parameter the language monomorphises into
+// the same code, so the fold IS the visitor: whatever a fold would
+// carry, an impl carries in its own fields.
+//
+// EVERY MATCH IN HERE HAS NO WILDCARD, and that is the point of
+// putting the recursion in one module.  Written by hand at each pass,
+// this recursion is forty lines ending in a catch-all, and the
+// catch-all is where the bugs live: a walker that stops at a form it
+// forgot does not report an error, it quietly answers for a smaller
+// program than the one it was given.  The reference paid for that
+// exactly here — a call written inside a `"${…}"` hole reached no
+// walker at all, which cost a segfault, a missed capture and three
+// passes' worth of silently skipped work.  Adding a node kind to
+// `nsyast` is a compile error at this one site.
+//
+// NO EFFECTS OF ITS OWN.
+
+use std.list
+use nsytoken
+
+// What an identifier occurrence IS, where it occurs.
+//
+// The role is what separates "rename this variable" from "rename every
+// variable with this name": a reference and a definition are the same
+// bytes and different facts, and a consumer that had only the bytes
+// would have to re-derive the difference from the node kind it just
+// threw away.
+pub enum NsyNameRole
+    // The name a declaration introduces.
+    NsyRoleDefine
+    // A `let`, `var`, parameter or pattern binding.
+    NsyRoleBind
+    // A use of a name in expression position.
+    NsyRoleUse
+    // A name in type position.
+    NsyRoleType
+    // A field or method after a `.`.
+    NsyRoleMember
+    // A segment of a `use` path.
+    NsyRoleModule
+    // A label at a call site — the `x` in `f(x: 1)`.
+    NsyRoleArgLabel
+
+// The visitor.  Override the nodes you care about; the defaults
+// descend into everything and record nothing.
+//
+// `enter_*` answers whether to descend.  Answering `false` prunes the
+// subtree, which is what an outline does at a function body and what a
+// query that has already found its answer does everywhere.
+pub trait NsyVisitor[e]
+    fn enter_decl(mut self, decl: NsyDecl) -> Bool [e]
+        let _ = decl
+        true
+
+    fn leave_decl(mut self, decl: NsyDecl) [e]
+        let _ = decl
+        pass
+
+    fn enter_stmt(mut self, stmt: NsyStmt) -> Bool [e]
+        let _ = stmt
+        true
+
+    fn leave_stmt(mut self, stmt: NsyStmt) [e]
+        let _ = stmt
+        pass
+
+    fn enter_expr(mut self, value: NsyExpr) -> Bool [e]
+        let _ = value
+        true
+
+    fn leave_expr(mut self, value: NsyExpr) [e]
+        let _ = value
+        pass
+
+    fn enter_pat(mut self, pat: NsyPat) -> Bool [e]
+        let _ = pat
+        true
+
+    fn leave_pat(mut self, pat: NsyPat) [e]
+        let _ = pat
+        pass
+
+    fn enter_type(mut self, ty: NsyType) -> Bool [e]
+        let _ = ty
+        true
+
+    fn leave_type(mut self, ty: NsyType) [e]
+        let _ = ty
+        pass
+
+    fn enter_annot(mut self, annot: NsyAnnot) -> Bool [e]
+        let _ = annot
+        true
+
+    // A literal node, wherever it appears — inside an expression, and
+    // also as an array's length, a register's address, a memory
+    // region's size.  The last three are the ones a hand-written
+    // walker forgets, because they are the only literals that are not
+    // under an expression.
+    fn visit_lit(mut self, lit: NsyLit) [e]
+        let _ = lit
+        pass
+
+    // Every identifier occurrence, with what it is doing there.
+    fn visit_name(mut self, name: Str, span: NsySpan, role: NsyNameRole) [e]
+        let _ = name
+        let _ = span
+        let _ = role
+        pass
+
+// Walk a whole file.
+//
+// ```novo
+// use nsytoken
+// use nsyparse
+// use nsyvisit
+//
+// fn main() [io]
+//     let r = nsyparse.parse(nsytoken.source("pass\n"))
+//     println("${list.len(r.tree.decls)}")
+// ```
+pub fn walk_tree<V: NsyVisitor[e]>(mut v: V, tree: NsyTree) [e]
+    todo("novo-syntax.nsyvisit.walk_tree")
+
+// Walk one declaration.
+pub fn walk_decl<V: NsyVisitor[e]>(mut v: V, decl: NsyDecl) [e]
+    todo("novo-syntax.nsyvisit.walk_decl")
+
+// Walk a block of statements.
+pub fn walk_stmts<V: NsyVisitor[e]>(mut v: V, body: [NsyStmt]) [e]
+    todo("novo-syntax.nsyvisit.walk_stmts")
+
+// Walk one statement.
+pub fn walk_stmt<V: NsyVisitor[e]>(mut v: V, stmt: NsyStmt) [e]
+    todo("novo-syntax.nsyvisit.walk_stmt")
+
+// Walk one expression.
+pub fn walk_expr<V: NsyVisitor[e]>(mut v: V, value: NsyExpr) [e]
+    todo("novo-syntax.nsyvisit.walk_expr")
+
+// Walk one pattern.
+pub fn walk_pat<V: NsyVisitor[e]>(mut v: V, pat: NsyPat) [e]
+    todo("novo-syntax.nsyvisit.walk_pat")
+
+// Walk one written type.
+pub fn walk_type<V: NsyVisitor[e]>(mut v: V, ty: NsyType) [e]
+    todo("novo-syntax.nsyvisit.walk_type")
+
+// ── rewriting ───────────────────────────────────────────────────────
+
+// The transform counterpart of `NsyVisitor`.
+//
+// SEPARATE FROM THE VISITOR, because the two disagree about what comes
+// back out of them, and merging the pair would make every analysis
+// rebuild a tree it did not change.  An analysis iterates; a lint's
+// autofix and a macro expansion map.  The reference draws the same
+// line, between its `iter_children` and its `map_children`.
+//
+// Each method answers the node to put in place of the one it was
+// given.  The default answers the node unchanged — but the walker
+// below still descends into it, so an impl that rewrites only
+// `NsyExprKind.NsyExBinop` still gets every binop in the file,
+// including the ones nested inside statements and annotations it never
+// mentioned.
+//
+// POST-ORDER: children are rewritten before the parent is offered, so
+// a rule that matches on a child sees the rewritten one.  A rule that
+// needs the original has its own node's `span` and the source.
+pub trait NsyRewriter[e]
+    fn rewrite_decl(mut self, decl: NsyDecl) -> NsyDecl [e]
+        decl
+
+    fn rewrite_stmt(mut self, stmt: NsyStmt) -> NsyStmt [e]
+        stmt
+
+    fn rewrite_expr(mut self, value: NsyExpr) -> NsyExpr [e]
+        value
+
+    fn rewrite_pat(mut self, pat: NsyPat) -> NsyPat [e]
+        pat
+
+    fn rewrite_type(mut self, ty: NsyType) -> NsyType [e]
+        ty
+
+// Rewrite a whole file, post-order.
+pub fn rewrite_tree<R: NsyRewriter[e]>(mut r: R, tree: NsyTree) -> NsyTree [e]
+    todo("novo-syntax.nsyvisit.rewrite_tree")
+
+// Rewrite one declaration and everything under it.
+pub fn rewrite_decl<R: NsyRewriter[e]>(mut r: R, decl: NsyDecl) -> NsyDecl [e]
+    todo("novo-syntax.nsyvisit.rewrite_decl")
+
+// Rewrite a block of statements.
+pub fn rewrite_stmts<R: NsyRewriter[e]>(mut r: R, body: [NsyStmt]) -> [NsyStmt] [e]
+    todo("novo-syntax.nsyvisit.rewrite_stmts")
+
+// Rewrite one expression and everything under it.
+pub fn rewrite_expr<R: NsyRewriter[e]>(mut r: R, value: NsyExpr) -> NsyExpr [e]
+    todo("novo-syntax.nsyvisit.rewrite_expr")
+
+// ── the structure, as data ──────────────────────────────────────────
+//
+// The walkers above are the way to traverse the tree.  These three are
+// for the consumer that wants to drive its own loop — a query that
+// descends only one branch, an editor's "expand selection", a
+// breadth-first search.  They allocate a list per call, which is why
+// they are not what the walkers are built on.
+
+// The expression children of an expression, in source order.
+pub fn expr_children(value: NsyExpr) -> [NsyExpr]
+    todo("novo-syntax.nsyvisit.expr_children")
+
+// The statement children of a statement, in source order.  A nested
+// declaration's body is included: a `fn` written inside a body is
+// still part of the file.
+pub fn stmt_children(stmt: NsyStmt) -> [NsyStmt]
+    todo("novo-syntax.nsyvisit.stmt_children")
+
+// The statements a declaration contains at its top level — a
+// function's body, an impl's methods' bodies concatenated.  Empty for
+// the declarations that have none.
+pub fn decl_bodies(decl: NsyDecl) -> [NsyStmt]
+    todo("novo-syntax.nsyvisit.decl_bodies")

@@ -1,0 +1,215 @@
+// nsyprint.nv — the tree back to source text.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE CORRECTNESS CRITERION IS NOT "LOOKS TIDY".  It is ROUND-TRIP
+// TREE IDENTITY: `parse(print(t))` must equal `t`, node for node.
+// Everything else in this module follows from that one sentence.
+//
+// The tree records no parentheses.  `(a + b) * c` and `a + b * c` are
+// the same operators in a different SHAPE, so a printer that
+// concatenated its children would hand the parser a flat token run
+// that the parser re-associates by its OWN table — and the file
+// silently computes a different answer.  `nsyast.binop_level` is the
+// cascade as a number and this module parenthesises by comparing them,
+// which means a grammar change that inserts or moves a level has
+// exactly one constant to move rather than a printer that quietly
+// starts lying.
+//
+// A LITERAL IS PRINTED FROM ITS SPAN, not from its value.  `0x00000000`
+// rendered from the integer comes back `0x0`, and a register map
+// transcribed from a datasheet stops lining up against it; `'0'` is an
+// integer by the time it reaches the tree and nothing downstream knows
+// it was ever a character.  Every `NsyLit` carries a span, so the
+// spelling is one `nsytoken.slice` away — and the printer re-checks
+// that the spelling decodes to the value in the tree before using it,
+// so a node some pass synthesised, or one whose literal a rewrite
+// changed, falls back to rendering the value.
+//
+// COMMENTS COME FROM THE TOKEN STREAM, and this is the only module in
+// the package that has to know where they were.  The parser does not
+// thread them — keeping trivia out of the grammar is what keeps the
+// grammar readable — so `print_tree` takes the token stream beside the
+// tree and re-interleaves the trivia by span.  What it does NOT do is
+// re-scan the source for comments, which is how `novo fmt` recovers
+// them today and is why a scanner that knew `//` and not `#` or
+// `/* … */` deleted every comment it did not know, with no diagnostic
+// and exit 0.  A comment this printer cannot place is a comment the
+// LEXER did not produce, and the lexer produces all of them.
+//
+// INTO A CALLER'S BUFFER.  Every entry point appends to a
+// `str.builder` handle the caller owns rather than answering a `Str`.
+// A formatter that built one string per node would allocate once per
+// node and throw all but the last away; `to_source` is the
+// convenience for a caller that wants the string and does not care.
+//
+// NO EFFECTS, with one exception that is not one: `write_tree` binds
+// its writer's effect parameter and is charged what the writer costs.
+// Writing to an in-memory buffer costs nothing; writing to a file
+// costs `[io, fs]`, declared by the impl and paid by the caller.
+
+use nsytoken
+use nsyast
+
+// What the printer is allowed to decide.
+//
+// A STYLE VALUE WITH EXACTLY ONE CANONICAL SETTING.  `novo fmt` has
+// one style and should keep having one — a formatter with options is a
+// formatter every project configures differently, and then a diff
+// across projects is noise.  The value exists because the OTHER
+// consumers are real and want something else: a hover renders a
+// signature into a tooltip with no wrapping at all, a test wants a
+// snippet at a narrow width, and a generated file wants no comment
+// re-indentation because it has no comments.  `canonical()` is what
+// the formatter uses and what the byte-stability gate asserts against.
+pub struct NsyStyle
+    // Spaces per indentation level.  Four, canonically.
+    indent: Int
+    // The column a line is wrapped at, or 0 for no wrapping.
+    width: Int
+    // The most consecutive blank lines kept between items.  A
+    // formatter that kept all of them would never normalise; one that
+    // kept none would join every paragraph in the file.
+    blank_lines: Int
+    // Print comments and blank-line runs from the token stream.  False
+    // for a caller printing a synthesised tree that has no stream.
+    trivia: Bool
+
+// The one canonical style: four spaces, wrapped at 80, at most one
+// blank line between items, trivia kept.
+//
+// ```novo
+// use nsyprint
+//
+// fn main() [io]
+//     println("${nsyprint.canonical().indent}")
+// ```
+pub fn canonical() -> NsyStyle
+    todo("novo-syntax.nsyprint.canonical")
+
+// The style for rendering one construct into a tooltip or a
+// diagnostic: no wrapping, no trivia, four spaces.
+pub fn compact() -> NsyStyle
+    todo("novo-syntax.nsyprint.compact")
+
+// ── printing into a buffer ──────────────────────────────────────────
+
+// Print a whole file into the caller's `str.builder` handle.
+//
+// `toks` is the stream the tree was parsed from, trivia included; it
+// is what the comments are taken from.  A caller printing a tree it
+// built itself passes `[]` and a style with `trivia = false`.
+pub fn print_tree(buf: Int, src: NsySource, toks: [NsyToken], tree: NsyTree,
+                  style: NsyStyle) -> Unit
+    todo("novo-syntax.nsyprint.print_tree")
+
+// One declaration, at indentation level `depth`.
+pub fn print_decl(buf: Int, src: NsySource, toks: [NsyToken], decl: NsyDecl, depth: Int,
+                  style: NsyStyle) -> Unit
+    todo("novo-syntax.nsyprint.print_decl")
+
+// One statement, at indentation level `depth`.
+pub fn print_stmt(buf: Int, src: NsySource, toks: [NsyToken], stmt: NsyStmt, depth: Int,
+                  style: NsyStyle) -> Unit
+    todo("novo-syntax.nsyprint.print_stmt")
+
+// One expression, parenthesised for a context of the given precedence
+// level.
+//
+// `level` IS AN ARGUMENT because a caller printing a subtree into a
+// larger expression has to say what surrounds it, and a printer that
+// assumed the loosest level would emit parentheses a person did not
+// write — which round-trips fine and reads badly.
+// `nsyast.binop_level` supplies the numbers.
+pub fn print_expr(buf: Int, src: NsySource, value: NsyExpr, level: Int, style: NsyStyle) -> Unit
+    todo("novo-syntax.nsyprint.print_expr")
+
+// One written type.
+pub fn print_type(buf: Int, src: NsySource, ty: NsyType) -> Unit
+    todo("novo-syntax.nsyprint.print_type")
+
+// One pattern.
+pub fn print_pat(buf: Int, src: NsySource, pat: NsyPat) -> Unit
+    todo("novo-syntax.nsyprint.print_pat")
+
+// A function's SIGNATURE alone — annotations, `pub`, `async`, the
+// name, the parameters, the return type and the effect clause, with no
+// body.
+//
+// What a hover shows, what an outline labels a node with, and what
+// `novo doc` puts at the head of a reference entry.  Separate from
+// `print_decl` because all three of those want it without the body and
+// none of them wants to print the body and then cut it off.
+pub fn print_signature(buf: Int, src: NsySource, decl: NsyFn, style: NsyStyle) -> Unit
+    todo("novo-syntax.nsyprint.print_signature")
+
+// An effect clause — `[io, fs]`, or nothing when the source wrote
+// none.
+//
+// A function of its own because the difference between "no clause" and
+// "the empty clause" is a field on `NsyEffects` and every printer that
+// forgot to read it deleted the assertion `fn go() []` was making.
+pub fn print_effects(buf: Int, effects: NsyEffects) -> Unit
+    todo("novo-syntax.nsyprint.print_effects")
+
+// ── the convenience, and the gate ───────────────────────────────────
+
+// The whole file as a `Str`.
+//
+// ```novo
+// use nsytoken
+// use nsylex
+// use nsyparse
+// use nsyprint
+//
+// fn main() [io]
+//     let s = nsytoken.source("pass\n")
+//     let toks = nsylex.lex(s)
+//     let r = nsyparse.parse_tokens(s, toks)
+//     println(nsyprint.to_source(s, toks, r.tree, nsyprint.canonical()))
+// ```
+pub fn to_source(src: NsySource, toks: [NsyToken], tree: NsyTree, style: NsyStyle) -> Str
+    todo("novo-syntax.nsyprint.to_source")
+
+// One expression as a `Str`, at the loosest level.
+pub fn expr_to_source(src: NsySource, value: NsyExpr) -> Str
+    todo("novo-syntax.nsyprint.expr_to_source")
+
+// Is the source already exactly what this printer would write?
+//
+// THE FORMATTER'S `--check` MODE, AND THE PACKAGE'S OWN GATE.  A
+// byte comparison of the source against `to_source` of its own parse,
+// which is a stronger statement than "the formatter is idempotent":
+// idempotence is satisfied by a printer that mangles a file the same
+// way twice, and this is not.
+//
+// The claim the README makes, and the one the API tests assert over
+// every `.nv` file they are pointed at: a file that is canonical stays
+// byte-identical through a parse and a print.
+pub fn is_canonical(src: NsySource, style: NsyStyle) -> Bool
+    todo("novo-syntax.nsyprint.is_canonical")
+
+// The first byte offset at which the source and its re-print differ,
+// or `None` when they do not.
+//
+// What a `--check` failure reports.  A tool that only knew "this file
+// is not formatted" would send a person to look at the whole file.
+pub fn first_difference(src: NsySource, style: NsyStyle) -> ?Int
+    todo("novo-syntax.nsyprint.first_difference")
+
+// ── writing to a caller's sink ──────────────────────────────────────
+
+// Print a whole file to the caller's writer.
+//
+// THE ONE EFFECT-POLYMORPHIC ENTRY POINT IN THE PACKAGE.  The bound
+// binds `Write`'s effect parameter and the clause spends it, so this
+// costs whatever the caller's sink costs: nothing for an in-memory
+// buffer, `[io, fs]` for a file, `[io, net]` for a socket.  The cost
+// is the impl's, declared where the impl is — which is what lets a
+// `core` package hand a formatted file to a host without either of
+// them lying about what it spent.
+//
+// Answers the writer's first error, or `None`.
+pub fn write_tree<W: Write[e]>(w: W, src: NsySource, toks: [NsyToken], tree: NsyTree,
+                               style: NsyStyle) -> ?IoError [e]
+    todo("novo-syntax.nsyprint.write_tree")

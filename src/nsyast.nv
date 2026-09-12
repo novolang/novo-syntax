@@ -1,0 +1,964 @@
+// nsyast.nv — the parse tree, as novo-lang types.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A SPAN ON EVERY NODE, AND THE SPAN IS WHY THE TYPES ARE SHAPED THIS
+// WAY.  Each syntactic category is a pair: a `kind` enum that says
+// what the node is, wrapped in a struct that carries its span.  So
+// `NsyExpr { kind: NsyExprKind, span }`, and never a span field
+// repeated across sixty variants.
+//
+// That is not tidiness.  The reference tree
+// (`compiler/lib/ast.ml`) positions expressions, statements and
+// declarations and leaves types, patterns and members bare — and then
+// carries SEVEN position fields that were added one at a time, each
+// after a formatter bug: `sf_pos` on a struct member ("a member list
+// is the one place the formatter could not thread a comment, because
+// there was no line to key one to"), `ev_pos` on an enum variant,
+// `fs_pos` on a trait signature, `rg_addr_pos` on a register's address
+// ("`novo fmt` renders an address from its value, so `0x00000000` came
+// back `0x0` and a register map stopped lining up against the
+// datasheet"), `mr_base_pos` and `mr_size_pos` on a memory region,
+// `ms_pad_pos` on a section, `vt_addr_pos` on a vector table, and
+// `bsp_member_lines` — an association list of member names to line
+// numbers — on a board-support declaration.  Each is the same fact
+// discovered again.  Making the span TOTAL is that fact stated once,
+// and it is the one place this package's tree deliberately differs
+// from the reference's.
+//
+// A LITERAL IS A NODE for the same reason.  `NsyLit` carries a span,
+// so an array's length, a register's address, a memory region's base
+// and size and a section's padding are all literal nodes with
+// spellings a printer can read back — which is exactly what those four
+// `_pos` fields were bolted on to provide.
+//
+// WHAT THE TREE CARRIES AND WHAT IT LEAVES IN THE SOURCE.  Identifiers
+// are `Str`, because every consumer compares them by name and a tree
+// that made each one a span would have every lookup allocate.
+// Literal SPELLINGS stay in the source and are reached through the
+// node's span, because they exist only for the printer.  A string
+// literal's VALUE is carried, decoded, because the parser had it
+// anyway.
+//
+// NO EFFECTS.
+
+// ── effects ─────────────────────────────────────────────────────────
+
+// The effect labels SPEC § 5.1 defines, plus the polymorphic one.
+//
+// `NsyEffPoly` is the name a generic function binds from a trait's
+// effect parameter — `fn count<S: Read[e]>(s: S) -> Int [e]` writes
+// `e`, and the clause carries `NsyEffPoly("e")`.  A caller substitutes
+// it with whatever the impl behind `S` supplies.
+pub enum NsyEffectLabel
+    NsyEffIo
+    NsyEffNet
+    NsyEffAi
+    NsyEffHw
+    NsyEffFs
+    NsyEffFfi
+    NsyEffTime
+    NsyEffRand
+    NsyEffMutate
+    NsyEffMcp
+    NsyEffIpc
+    NsyEffAsync
+    NsyEffExpectInvariant
+    NsyEffPoly(name: Str)
+
+// The label a word spells, or `None` for a word that is not one.
+//
+// ```novo
+// use nsyast
+//
+// fn main() [io]
+//     match nsyast.effect_of("net")
+//         Some(e) => println(nsyast.effect_text(e))
+//         None    => println("not an effect")
+// ```
+pub fn effect_of(word: Str) -> ?NsyEffectLabel
+    todo("novo-syntax.nsyast.effect_of")
+
+// The word a label is written as.  `NsyEffPoly` answers its own name.
+pub fn effect_text(label: NsyEffectLabel) -> Str
+    todo("novo-syntax.nsyast.effect_text")
+
+// An EFFECT CLAUSE as written: the labels, and whether the source
+// wrote the brackets at all.
+//
+// TWO FACTS, NOT ONE, and the reference learned this three times over
+// — `fn_effects_written`, `fs_effects_written`, `im_effects_written`.
+// An empty label list is two different programs: `fn go() []` asserts
+// the function is pure, and `fn go()` asserts nothing and asks for
+// inference.  A tree that recorded only the labels loses the
+// difference, and loses it identically on both sides of
+// `parse(print(x)) == parse(x)` — so the round-trip gate cannot catch
+// the loss either.  One type carrying both, used everywhere a clause
+// can appear, is that lesson as a type.
+pub struct NsyEffects
+    labels: [NsyEffectLabel]
+    written: Bool
+    span: NsySpan
+
+// ── types ───────────────────────────────────────────────────────────
+
+// A written type, with its span.
+pub struct NsyType
+    kind: NsyTypeKind
+    span: NsySpan
+
+// Which written type this is.  Every arm is one production of the
+// grammar's type rule; a caller that needs the source text back asks
+// `nsyast.type_text` rather than matching them all itself.
+pub enum NsyTypeKind
+    // `Str`, `Int`, `Point`, and a type parameter's name.
+    NsyTyName(name: Str)
+    // `[T]`
+    NsyTyList(elem: NsyType)
+    // `[T; N]`.  `len` is a literal node, so `[u8; 0x400]` keeps its
+    // hexadecimal spelling.
+    NsyTyArray(elem: NsyType, len: NsyLit)
+    // `(T, U)`
+    NsyTyTuple(parts: [NsyType])
+    // `?T`
+    NsyTyOpt(inner: NsyType)
+    // `Result<T>` and `Result<T, E>`.
+    NsyTyResult(ok: NsyType, err: ?NsyType)
+    // `Foo<A, B>`
+    NsyTyGeneric(name: Str, args: [NsyType])
+    // `fn(A, B) -> C [io]`
+    NsyTyFn(params: [NsyType], ret: NsyType, effects: NsyEffects)
+    // `weak T`
+    NsyTyWeak(inner: NsyType)
+    // `dyn Trait`
+    NsyTyDyn(inner: NsyType)
+    // `*T` and `*const T`.
+    NsyTyPtr(inner: NsyType, is_const: Bool)
+    // A type the parser could not read.  See `NsyExError`.
+    NsyTyError
+
+// The key every impl table files and finds an impl under.
+//
+// `impl Display for [Str]` has to land somewhere a use site can look
+// it up, and the language's tables are keyed by a string.  ONE
+// function computes that string, so a definition site and a use site
+// cannot disagree — which is the reference's own arrangement
+// (`Ast.impl_target_key`) and the reason this is public rather than
+// internal: `nsycheck` needs it, `nsyquery` needs it to answer "go to
+// the impl", and a consumer building its own index needs the same
+// answer both of them got.
+//
+// `[T; N]` keys as `[T]` does, because the length erases before
+// anything downstream sees it and an impl filed under a
+// length-bearing key would be one nothing could look up.
+pub fn impl_target_key(ty: NsyType) -> Str
+    todo("novo-syntax.nsyast.impl_target_key")
+
+// The type as source text — what a diagnostic prints and what
+// `nsyprint` writes.  `[T; N]` comes back with its length.
+pub fn type_text(ty: NsyType) -> Str
+    todo("novo-syntax.nsyast.type_text")
+
+// ── literals ────────────────────────────────────────────────────────
+
+// A literal, with its span — which is what makes its SPELLING
+// recoverable.  `255`, `0xFF` and `0b1111_1111` are one value and
+// three nodes.
+pub struct NsyLit
+    kind: NsyLitKind
+    span: NsySpan
+
+// Which literal this is, and its value.  The SPELLING is not here —
+// it is the enclosing `NsyLit`'s span — because only a printer wants
+// it and everything else wants the number.
+pub enum NsyLitKind
+    // An integer that fits 64 bits, with the radix it was written in.
+    NsyLitInt(value: Int, radix: NsyRadix)
+    // The bare 2^63 literal, legal only directly under a unary minus.
+    // A variant of its own because the value does not fit the type
+    // that would carry it.
+    NsyLitIntMin
+    NsyLitFloat(value: Float)
+    // The decoded value, and `form` for how it was written.  A
+    // triple-quoted literal's value is its source dedented, so the two
+    // are not the same text and both are needed.
+    NsyLitStr(value: Str, form: NsyStrForm)
+    NsyLitBool(value: Bool)
+    NsyLitNull
+    // `()` — the unit value.
+    NsyLitUnit
+
+// ── patterns ────────────────────────────────────────────────────────
+
+// A pattern, with its span.
+pub struct NsyPat
+    kind: NsyPatKind
+    span: NsySpan
+
+// Which pattern this is.  One arm per production of the grammar's
+// pattern rule.
+pub enum NsyPatKind
+    // `_`
+    NsyPaWild
+    NsyPaLit(lit: NsyLit)
+    // A binding: `x`.
+    NsyPaVar(name: Str)
+    // `Some(x)`, `Nil`.
+    NsyPaEnum(name: Str, args: [NsyPat])
+    // `Point { x, y }` and `Point { x, .. }`.  `rest` is the `..`.
+    NsyPaStruct(name: Str, fields: [NsyFieldPat], rest: Bool)
+    // `1..5` and `1..=5`.
+    NsyPaRange(low: NsyLit, high: NsyLit, inclusive: Bool)
+    NsyPaTuple(parts: [NsyPat])
+    NsyPaList(parts: [NsyPat])
+    // `p as name`
+    NsyPaAs(inner: NsyPat, name: Str)
+    // `a | b | c`
+    NsyPaOr(parts: [NsyPat])
+    // `[a, b, ...rest]` — the head patterns and the binder for the
+    // tail.
+    NsyPaCons(heads: [NsyPat], rest: Str)
+    // A pattern the parser could not read.  See `NsyExError`.
+    NsyPaError
+
+// One field of a struct pattern.  `pat` is `None` for the shorthand
+// `Point { x }`, which binds `x` to the field of that name — a
+// distinction a printer needs and a resolver does not.
+pub struct NsyFieldPat
+    name: Str
+    pat: ?NsyPat
+    span: NsySpan
+
+// ── operators ───────────────────────────────────────────────────────
+
+// The binary operators, one per production of the expression cascade.
+//
+// `NsyBinRange` and `NsyBinRangeInc` are operators rather than a form
+// of their own because that is where the grammar puts them.
+pub enum NsyBinOp
+    NsyBinAdd
+    NsyBinSub
+    NsyBinMul
+    NsyBinDiv
+    NsyBinMod
+    NsyBinEq
+    NsyBinNe
+    NsyBinLt
+    NsyBinGt
+    NsyBinLe
+    NsyBinGe
+    NsyBinAnd
+    NsyBinOr
+    NsyBinBAnd
+    NsyBinBOr
+    NsyBinBXor
+    NsyBinShl
+    NsyBinShr
+    NsyBinShrLogical
+    NsyBinRange
+    NsyBinRangeInc
+
+// The four prefix operators: `-`, `not`, `*` and `~`.
+pub enum NsyUnOp
+    NsyUnNeg
+    NsyUnNot
+    NsyUnDeref
+    NsyUnBNot
+
+// The assignment operators.  `a += b` is `NsyAsgAdd` and NOT the
+// expansion `a = a + b`: the tree keeps what the author wrote, because
+// a formatter over an expanded tree rewrites the file.
+pub enum NsyAssignOp
+    NsyAsgEq
+    NsyAsgAdd
+    NsyAsgSub
+    NsyAsgMul
+    NsyAsgDiv
+
+// How tightly an operator binds — the parser's cascade, loosest
+// first, as a number.
+//
+// PUBLIC BECAUSE THE PRINTER IS THE SECOND READER AND CANNOT GUESS.
+// The tree records no parentheses, so `(a + b) * c` and `a + b * c`
+// are the same operators in a different SHAPE; a printer that
+// concatenated its children would hand the parser a flat token run
+// that the parser re-associates by its own table, and the file
+// silently computes a different answer.  `nsyprint` parenthesises by
+// comparing these numbers, and a grammar change that moves a level has
+// exactly one constant to move.
+pub fn binop_level(op: NsyBinOp) -> Int
+    todo("novo-syntax.nsyast.binop_level")
+
+// The operator's spelling.
+pub fn binop_text(op: NsyBinOp) -> Str
+    todo("novo-syntax.nsyast.binop_text")
+
+// The prefix operator's spelling.
+pub fn unop_text(op: NsyUnOp) -> Str
+    todo("novo-syntax.nsyast.unop_text")
+
+// The assignment operator's spelling.
+pub fn assign_op_text(op: NsyAssignOp) -> Str
+    todo("novo-syntax.nsyast.assign_op_text")
+
+// ── expressions ─────────────────────────────────────────────────────
+
+// An expression, with its span.
+pub struct NsyExpr
+    kind: NsyExprKind
+    span: NsySpan
+
+// Which expression this is.  One arm per production of the grammar's
+// expression cascade, in the cascade's own order.
+pub enum NsyExprKind
+    NsyExLit(lit: NsyLit)
+    NsyExVar(name: Str)
+    NsyExCall(callee: NsyExpr, args: [NsyCallArg])
+    // `a.b`
+    NsyExField(recv: NsyExpr, name: Str)
+    // `a?.b`
+    NsyExSafeField(recv: NsyExpr, name: Str)
+    // `a[i]`
+    NsyExIndex(recv: NsyExpr, index: NsyExpr)
+    NsyExBinop(op: NsyBinOp, left: NsyExpr, right: NsyExpr)
+    NsyExUnop(op: NsyUnOp, operand: NsyExpr)
+    // `a |> b`
+    NsyExPipe(left: NsyExpr, right: NsyExpr)
+    // `a ?? b`
+    NsyExNullCoalesce(left: NsyExpr, right: NsyExpr)
+    // `e!`
+    NsyExBang(inner: NsyExpr)
+    NsyExTuple(parts: [NsyExpr])
+    NsyExList(parts: [NsyExpr])
+    NsyExStruct(name: Str, fields: [NsyFieldInit])
+    NsyExLambda(lambda: NsyLambda)
+    NsyExIf(node: NsyIf)
+    NsyExMatch(node: NsyMatch)
+    NsyExAwait(inner: NsyExpr)
+    // `loop` with `break value`.
+    NsyExLoop(body: [NsyStmt])
+    // `e as T`
+    NsyExCast(inner: NsyExpr, ty: NsyType)
+    // `"a=${e}b"` — parsed once, at parse time.  The reference's own
+    // note is worth repeating: a walker that did not descend into
+    // holes missed a call written inside one entirely, and three
+    // passes silently did less work than the program asked for.
+    // `nsyvisit` descends, and its match has no wildcard.
+    NsyExInterp(parts: [NsyInterpPart])
+    // `[f(x) for x in xs if p(x)]`
+    NsyExListComp(comp: NsyListComp)
+    // A HOLE THE PARSER LEFT where it could not read an expression.
+    //
+    // The node that makes recovery a fact about the tree rather than a
+    // convention.  `nsyparse` never answers "no tree": a file being
+    // typed in is broken most of the time it is looked at, and an
+    // editor that got nothing back would have no outline, no
+    // highlighting and no completion for as long as the author was
+    // mid-edit.  So a failure becomes this node, at the span that
+    // failed, and the parser resynchronises.
+    //
+    // It carries nothing.  What went wrong is in
+    // `nsyparse.NsyParseResult.faults`, keyed by the same span — two
+    // fields that must agree would be one fact with two chances to be
+    // wrong.
+    NsyExError
+
+// One argument at a call site.  `label` is the name in `f(x: 1)`.
+pub struct NsyCallArg
+    label: ?Str
+    value: NsyExpr
+    span: NsySpan
+
+// One field of a struct literal.
+pub struct NsyFieldInit
+    name: Str
+    value: NsyExpr
+    span: NsySpan
+
+// One piece of an interpolated string.  `format` is the `:spec` after
+// the expression, carried as written.
+pub enum NsyInterpPart
+    NsyIpLit(text: Str)
+    NsyIpExpr(value: NsyExpr, format: ?Str)
+
+// A lambda: its parameters and its body.
+pub struct NsyLambda
+    params: [NsyParam]
+    body: NsyLambdaBody
+    span: NsySpan
+
+// A lambda's body is either one expression or an indented block, and
+// the two print differently, so the distinction is in the tree.
+pub enum NsyLambdaBody
+    NsyLbExpr(value: NsyExpr)
+    NsyLbBlock(body: [NsyStmt])
+
+// `if` in expression position, and `if` as a statement — one type,
+// because the grammar builds one shape and only the surrounding
+// context differs.  `otherwise` is the `else` body; an `elif` chain is
+// an `if` nested in it.
+pub struct NsyIf
+    cond: NsyExpr
+    then_body: [NsyStmt]
+    otherwise: [NsyStmt]
+    // The source wrote `then` — the inline ternary spelling — rather
+    // than an indented block.  The two parse to the same tree and
+    // print differently, so the flag is the printer's.
+    inline: Bool
+    span: NsySpan
+
+// A `match`: what is matched, and the arms.
+pub struct NsyMatch
+    subject: NsyExpr
+    arms: [NsyMatchArm]
+    span: NsySpan
+
+// One arm: a pattern, an optional guard, and a body.
+pub struct NsyMatchArm
+    pat: NsyPat
+    // `Some(x) if x > 0 =>`
+    guard: ?NsyExpr
+    body: NsyArmBody
+    span: NsySpan
+
+// An arm's body is either one expression or an indented block — the
+// same distinction a lambda's body has, and printed the same way.
+pub enum NsyArmBody
+    NsyAbExpr(value: NsyExpr)
+    NsyAbBlock(body: [NsyStmt])
+
+// `[f(x) for x in xs if p(x)]`.
+pub struct NsyListComp
+    elem: NsyExpr
+    binder: NsyPat
+    source: NsyExpr
+    filter: ?NsyExpr
+    span: NsySpan
+
+// ── statements ──────────────────────────────────────────────────────
+
+// A statement, with its span.
+pub struct NsyStmt
+    kind: NsyStmtKind
+    span: NsySpan
+
+// Which statement this is.  One arm per production of the grammar's
+// statement rule.
+pub enum NsyStmtKind
+    NsyStLet(name: Str, ty: ?NsyType, value: NsyExpr)
+    NsyStVar(name: Str, ty: ?NsyType, value: NsyExpr)
+    NsyStAssign(target: NsyExpr, op: NsyAssignOp, value: NsyExpr)
+    NsyStExpr(value: NsyExpr)
+    NsyStFor(binder: NsyPat, source: NsyExpr, body: [NsyStmt])
+    NsyStWhile(cond: NsyExpr, body: [NsyStmt])
+    NsyStReturn(value: ?NsyExpr)
+    NsyStBreak(value: ?NsyExpr)
+    NsyStContinue
+    // A declaration written inside a body — a nested `fn`, a local
+    // `struct`.
+    NsyStDecl(decl: NsyDecl)
+    NsyStPass
+    // `system { … }`
+    NsyStSystem(body: [NsyStmt])
+    NsyStAsm(block: NsyAsmBlock)
+    // An effect-discharge block, SPEC § 5.4: the labels it erases from
+    // what propagates out, and the body it erases them from.
+    NsyStDischarge(effects: NsyEffects, body: [NsyStmt])
+    // A statement the parser could not read.  See `NsyExError`.
+    // Statement position is where recovery RESUMES, so this is the
+    // node a language server sees most often on a file mid-edit.
+    NsyStError
+
+// `asm <arch> { "instr" }` and its operand clauses.
+pub struct NsyAsmBlock
+    arch: Str
+    // The instruction lines, as written.
+    lines: [Str]
+    outputs: [NsyAsmOperand]
+    inputs: [NsyAsmOperand]
+    clobbers: [Str]
+    span: NsySpan
+
+// One operand of an `asm` block: its constraint string and the
+// expression bound to it.
+pub struct NsyAsmOperand
+    constraint: Str
+    value: NsyExpr
+    span: NsySpan
+
+// ── declarations ────────────────────────────────────────────────────
+
+// A declaration, with its span.
+pub struct NsyDecl
+    kind: NsyDeclKind
+    span: NsySpan
+
+// Which declaration this is.  One arm per declaration form the
+// language has, the embedded ones included — a formatter has to print
+// them and an outline has to name them.
+pub enum NsyDeclKind
+    NsyDcFn(decl: NsyFn)
+    NsyDcStruct(decl: NsyStruct)
+    NsyDcEnum(decl: NsyEnum)
+    NsyDcErrorKind(decl: NsyErrorKind)
+    NsyDcStateMachine(decl: NsyStateMachine)
+    NsyDcRegister(decl: NsyRegister)
+    NsyDcPeripheral(decl: NsyPeripheral)
+    NsyDcMemoryMap(decl: NsyMemoryMap)
+    NsyDcVectorTable(decl: NsyVectorTable)
+    NsyDcBsp(decl: NsyBsp)
+    NsyDcTrait(decl: NsyTrait)
+    NsyDcImpl(decl: NsyImpl)
+    NsyDcUse(decl: NsyUse)
+    NsyDcPrompt(decl: NsyPrompt)
+    NsyDcAlias(decl: NsyAlias)
+    NsyDcFrame(decl: NsyFrame)
+    NsyDcConst(decl: NsyConst)
+    NsyDcStatic(decl: NsyStatic)
+    // Script mode: a statement at file level.
+    NsyDcStmt(stmt: NsyStmt)
+    // A declaration the parser could not read.  See `NsyExError`.
+    NsyDcError
+
+// An annotation — `@derive(Eq)`, `@satisfies(REQ-001)`, `@test`.
+pub struct NsyAnnot
+    name: Str
+    args: [NsyAnnArg]
+    span: NsySpan
+
+// One argument of an annotation.  `label` is the name in
+// `@rename(to: "x")`.
+pub struct NsyAnnArg
+    label: ?Str
+    value: NsyExpr
+    span: NsySpan
+
+// `pub` IS A FIELD HERE, AND IT IS NOT IN THE REFERENCE.
+//
+// The reference carries visibility as a SYNTHETIC annotation named
+// `"pub"` that the parser adds, so that package visibility needed no
+// tree change.  The cost landed on the one consumer that turns a
+// declaration back into source: printing the annotation list verbatim
+// wrote `@pub` on its own line, which is not novo-lang syntax, and the
+// formatted file stopped parsing.  The fix in the reference is a
+// function that splits the list back apart at every print site.
+//
+// A visibility field is one boolean and no split, so every declaration
+// that can be `pub` carries one.  The order the printer needs is also
+// recorded here rather than rediscovered: `pub` binds OUTSIDE the
+// annotation list, so the keyword comes first and the `@…` lines
+// follow it.
+pub struct NsyFn
+    annots: [NsyAnnot]
+    is_pub: Bool
+    is_async: Bool
+    is_const: Bool
+    name: Str
+    tparams: [NsyTypeParam]
+    params: [NsyParam]
+    ret: ?NsyType
+    effects: NsyEffects
+    body: [NsyStmt]
+    span: NsySpan
+
+// One type parameter, its bounds, and the effect argument a bound
+// binds.
+//
+// `fn count<S: Read[e]>(s: S) -> Int [e]` gives one of these: the
+// name `S`, the bound `Read`, and `binds_effect = Some("e")` — the
+// name this function binds the trait's effect parameter under, which
+// the clause may then mention as `NsyEffPoly("e")`.  The reference
+// keeps the same fact in a third list beside the bounds
+// (`fn_bound_effects`) because three of its readers do not want it;
+// one record per parameter is the same information with nothing to
+// keep in step.
+pub struct NsyTypeParam
+    name: Str
+    bounds: [Str]
+    binds_effect: ?Str
+    span: NsySpan
+
+// One parameter: `mut` or not, its name, its type, and the default
+// the source wrote for it.
+pub struct NsyParam
+    is_mut: Bool
+    name: Str
+    ty: NsyType
+    default: ?NsyExpr
+    span: NsySpan
+
+// `struct Name<T>` and its fields.
+pub struct NsyStruct
+    annots: [NsyAnnot]
+    is_pub: Bool
+    name: Str
+    tparams: [NsyTypeParam]
+    fields: [NsyField]
+    span: NsySpan
+
+// The byte order a wire-layout member was annotated with.
+pub enum NsyEndian
+    NsyEndNone
+    NsyEndBig
+    NsyEndLittle
+
+// One struct member.
+pub struct NsyField
+    annots: [NsyAnnot]
+    is_mut: Bool
+    name: Str
+    ty: NsyType
+    default: ?NsyExpr
+    // The decoded form of `@be` / `@le`, which stays the single reader
+    // for wire layout; everything else reads `annots`.
+    endian: NsyEndian
+    span: NsySpan
+
+// `enum Name<T>` and its variants.
+pub struct NsyEnum
+    annots: [NsyAnnot]
+    is_pub: Bool
+    name: Str
+    tparams: [NsyTypeParam]
+    variants: [NsyVariant]
+    span: NsySpan
+
+// One enum variant and the fields it carries.
+pub struct NsyVariant
+    name: Str
+    fields: [NsyVariantField]
+    span: NsySpan
+
+// One field of a variant: `Some(value: T)` gives `value` and `T`.
+pub struct NsyVariantField
+    name: Str
+    ty: NsyType
+    span: NsySpan
+
+// `error_kind Name` — variants that each carry a short code string.
+pub struct NsyErrorKind
+    annots: [NsyAnnot]
+    is_pub: Bool
+    name: Str
+    variants: [NsyErrorVariant]
+    span: NsySpan
+
+// One `error_kind` variant, with the short code string that is the
+// whole point of the form.
+pub struct NsyErrorVariant
+    name: Str
+    fields: [NsyVariantField]
+    code: Str
+    span: NsySpan
+
+// `state_machine Name` — states, events and transitions.
+pub struct NsyStateMachine
+    annots: [NsyAnnot]
+    is_pub: Bool
+    name: Str
+    states: [NsyVariant]
+    events: [NsyVariant]
+    transitions: [NsyTransition]
+    span: NsySpan
+
+// One transition: a state pattern, an event pattern, an optional
+// guard, and the state to move to.
+pub struct NsyTransition
+    state_pat: NsyPat
+    event_pat: NsyPat
+    guard: ?NsyExpr
+    target: NsyExpr
+    span: NsySpan
+
+// `register NAME at 0xADDR : u32 { field … }`.
+//
+// `addr` is a literal NODE, so its spelling survives: a register map
+// is read against a datasheet, and `0x00000000` rendered back as `0x0`
+// stops lining up with it.
+pub struct NsyRegister
+    annots: [NsyAnnot]
+    name: Str
+    addr: NsyLit
+    width: Int
+    fields: [NsyRegField]
+    // `register CNF[32] at 0x700 stride 4` — the count and the stride
+    // in bytes, for a computed-address array.
+    count: ?NsyLit
+    stride: ?NsyLit
+    span: NsySpan
+
+// One bitfield of a register: its width and its offset within the
+// register's word.
+pub struct NsyRegField
+    name: Str
+    bits: Int
+    offset: Int
+    span: NsySpan
+
+// A block of registers at a shared base.  Each nested register's
+// `addr` is an OFFSET from `base`.
+pub struct NsyPeripheral
+    annots: [NsyAnnot]
+    name: Str
+    base: NsyLit
+    registers: [NsyRegister]
+    span: NsySpan
+
+// `memory_map NAME` — the regions and section placements a linker
+// script is generated from.
+pub struct NsyMemoryMap
+    name: Str
+    regions: [NsyRegion]
+    sections: [NsySection]
+    entry: ?Str
+    span: NsySpan
+
+// One memory region.  `base` and `size` are literal nodes, so
+// `512K` and `0x00000000` keep the spellings a datasheet was
+// transcribed in.
+pub struct NsyRegion
+    name: Str
+    base: NsyLit
+    size: NsyLit
+    span: NsySpan
+
+// One section placement.
+pub struct NsySection
+    name: Str
+    region: Str
+    // `Some("RAM")` for a `.data`-style section: stored in `region`,
+    // load-copied to this one at reset.
+    load_to: ?Str
+    pad_to: ?NsyLit
+    span: NsySpan
+
+// `vector_table <arch> at 0xADDR` — the exception vector table.
+pub struct NsyVectorTable
+    arch: Str
+    addr: NsyLit
+    // `(slot name, symbol)` in source order.
+    slots: [NsySlot]
+    irqs: NsyIrqSource
+    span: NsySpan
+
+// One vector-table slot: the slot's name and the handler symbol
+// bound to it.
+pub struct NsySlot
+    name: Str
+    symbol: Str
+    span: NsySpan
+
+// Where a vector table's chip interrupt slots come from: a `bsp`
+// declaration, an inline list, or nowhere.
+pub enum NsyIrqSource
+    // `irqs from bsp.Nrf52840`
+    NsyIrqFromBsp(name: Str)
+    // `irqs uart0 = 2, rtc0 = 11`
+    NsyIrqInline(slots: [NsyIrqSlot])
+    NsyIrqNone
+
+// One inline interrupt slot: a name and a vector number.
+pub struct NsyIrqSlot
+    name: Str
+    vector: Int
+    span: NsySpan
+
+// `bsp Name` — a board's description in one declaration.
+//
+// THE MEMBERS ARE A LIST, not nine fields with a parallel table of
+// line numbers.  The reference flattens them into scalars and then
+// carries `bsp_member_lines` beside them so the formatter can find
+// where each was written — and its own note says why that was needed:
+// a comment inside a `bsp` was re-emitted at column 0 below the whole
+// declaration, where it explained the next file-level thing instead of
+// the member it was written against.  A member with a span cannot be
+// separated from its position, so the parallel table has nothing to
+// drift from.
+pub struct NsyBsp
+    name: Str
+    members: [NsyBspMember]
+    span: NsySpan
+
+// One member of a `bsp` declaration, with its span — which is what
+// lets a comment written against it stay with it.
+pub struct NsyBspMember
+    kind: NsyBspMemberKind
+    span: NsySpan
+
+// Which member of a `bsp` declaration this is.
+pub enum NsyBspMemberKind
+    NsyBmArch(value: Str)
+    NsyBmChip(value: Str)
+    NsyBmVendor(value: Str)
+    NsyBmCpuClock(value: NsyLit)
+    NsyBmTargetTriple(value: Str)
+    NsyBmMemoryMap(value: NsyMemoryMap)
+    NsyBmPeripheral(value: NsyPeripheral)
+    NsyBmIrq(name: Str, vector: Int)
+
+// `trait Name<T>[e]` — its super-traits, its members and its
+// associated types.
+pub struct NsyTrait
+    annots: [NsyAnnot]
+    is_pub: Bool
+    name: Str
+    tparams: [NsyTypeParam]
+    // `trait FrameTransport[e]` — the names a member's clause may
+    // mention, each supplied concretely by every impl.
+    effect_params: [Str]
+    // Super-traits: `trait Ord: Eq`.
+    bounds: [Str]
+    members: [NsyTraitMember]
+    assoc_types: [NsyAssocType]
+    span: NsySpan
+
+// A trait member is either a required signature or a default method,
+// and the two are different shapes rather than one with an optional
+// body.
+pub enum NsyTraitMember
+    // A signature with no body.
+    NsyTmSig(sig: NsyFnSig)
+    // A default method.
+    NsyTmDefault(decl: NsyFn)
+
+// A method signature with no body — a trait's required member.
+pub struct NsyFnSig
+    is_async: Bool
+    name: Str
+    tparams: [NsyTypeParam]
+    params: [NsyParam]
+    ret: ?NsyType
+    effects: NsyEffects
+    span: NsySpan
+
+// `type Item` and `type Item = Str`.
+pub struct NsyAssocType
+    name: Str
+    default: ?NsyType
+    span: NsySpan
+
+// An `impl` block.  `trait_name` is empty for an inherent impl.
+//
+// `target` is the type as WRITTEN, and `nsyast.impl_target_key` is how
+// it becomes a table key; the key is not stored beside it, because two
+// fields that must agree are one fact with two chances to be wrong.
+pub struct NsyImpl
+    annots: [NsyAnnot]
+    trait_name: Str
+    trait_args: [NsyType]
+    // What this impl SUPPLIES for the trait's effect parameter —
+    // `impl FrameTransport[net, ipc] for UdsChan`.
+    effects: NsyEffects
+    target: NsyType
+    fns: [NsyFn]
+    assoc_types: [NsyAssocBind]
+    span: NsySpan
+
+// `type Item = Int` inside an impl — an associated type bound to a
+// concrete one.
+pub struct NsyAssocBind
+    name: Str
+    ty: NsyType
+    span: NsySpan
+
+// `use a.b`, `use a.b.{c, d}`, `use a.* ` and `pub use …`.
+pub struct NsyUse
+    path: [Str]
+    // `None` is the whole module; `Some` is `use a.b.{c, d}`.
+    names: ?[Str]
+    // `use ml.core as core` — the name the module is bound under.
+    // Spelled `bind_as` because `alias` is a reserved word.
+    bind_as: ?Str
+    // `use ml.*` — `path` is the PREFIX, not a module.
+    glob: Bool
+    // `pub use …` — a re-export.
+    is_pub: Bool
+    span: NsySpan
+
+// `prompt Name` — a named prompt, and the one it is derived from.
+pub struct NsyPrompt
+    annots: [NsyAnnot]
+    is_pub: Bool
+    name: Str
+    params: [NsyParam]
+    body: Str
+    // A prompt derived from another one.
+    base: ?Str
+    overrides: [NsyFieldInit]
+    append: ?Str
+    span: NsySpan
+
+// `alias Name<T> = <type>` — a NAME for a type, not a new type.
+pub struct NsyAlias
+    annots: [NsyAnnot]
+    is_pub: Bool
+    name: Str
+    tparams: [NsyTypeParam]
+    ty: NsyType
+    span: NsySpan
+
+// `frame Name = A + B` — an ordered stack of wire-layout structs.
+pub struct NsyFrame
+    name: Str
+    layers: [Str]
+    span: NsySpan
+
+// `const NAME[: T] = expr` — comptime-evaluated, inlined at its use
+// sites.
+pub struct NsyConst
+    annots: [NsyAnnot]
+    is_pub: Bool
+    name: Str
+    ty: ?NsyType
+    value: NsyExpr
+    span: NsySpan
+
+// `static NAME : [u8; N] [at 0xADDR]` — an addressable byte buffer,
+// placed by the linker or at a fixed address.
+pub struct NsyStatic
+    annots: [NsyAnnot]
+    is_pub: Bool
+    name: Str
+    size: NsyLit
+    // `static BUF : [u8; 64] at 0x2000_0000`, or `None` for a linker
+    // placement.
+    addr: ?NsyLit
+    span: NsySpan
+
+// ── the file ────────────────────────────────────────────────────────
+
+// One parsed file: its declarations and the span they cover.
+//
+// A named type rather than a bare `[NsyDecl]` because every entry
+// point in the package takes or answers one, and because a file's own
+// span is the answer to "what does this tree cover" that a language
+// server asks when it decides whether a cached tree still applies.
+pub struct NsyTree
+    decls: [NsyDecl]
+    span: NsySpan
+
+// The span of any declaration.
+pub fn decl_span(decl: NsyDecl) -> NsySpan
+    todo("novo-syntax.nsyast.decl_span")
+
+// The name a declaration introduces, or `""` for the ones that
+// introduce none — a `use`, a bare statement in script mode.
+pub fn decl_name(decl: NsyDecl) -> Str
+    todo("novo-syntax.nsyast.decl_name")
+
+// Is the declaration `pub`?
+pub fn decl_is_pub(decl: NsyDecl) -> Bool
+    todo("novo-syntax.nsyast.decl_is_pub")
+
+// The annotations on a declaration, in source order.
+pub fn decl_annots(decl: NsyDecl) -> [NsyAnnot]
+    todo("novo-syntax.nsyast.decl_annots")
+
+// The annotation of that name, or `None`.
+pub fn find_annot(annots: [NsyAnnot], name: Str) -> ?NsyAnnot
+    todo("novo-syntax.nsyast.find_annot")
+
+// A short kind word for a declaration — `"fn"`, `"struct"`,
+// `"impl"` — for an outline, a diagnostic and a corpus comparison.
+pub fn decl_kind_name(decl: NsyDecl) -> Str
+    todo("novo-syntax.nsyast.decl_kind_name")

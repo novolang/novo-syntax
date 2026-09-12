@@ -1,0 +1,45 @@
+[package]
+name        = "novo-syntax"
+version     = "0.0.1"
+description = "novo-lang's own front end as a library: the indentation-sensitive lexer, the recursive-descent parser, the typed AST with a span on every node, a visitor, a canonical printer, the resolution and effect-row tables, and the queries an editor asks — all of it over source the caller holds, with no file system anywhere."
+
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`, and for a front end that is the whole design rather than a
+# label.  A lexer's natural API opens a path and a language server's
+# natural API watches a directory; neither is here.  Source arrives as a
+# `Str` the caller already holds, a span is a byte range into that same
+# `Str`, and every answer is a value.  What that buys is that the same
+# parser runs inside `novols`, inside `novo fmt`, inside a wasm
+# playground and inside a test that holds one line of source in a
+# string literal — four deployments a `parse_file` API serves in one.
+layer       = "core"
+
+category    = "tooling"
+
+tags        = ["lexer", "parser", "ast", "formatter", "language-server", "novo-lang"]
+repository  = "https://github.com/novolang/novo-syntax"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "novo-lang's lexer, parser and AST as a package"
+
+[dependencies]
+# None, and the reason is the layer.  The two things a front end usually
+# reaches for are a file reader and a regular-expression engine; this
+# package has no file to read, and its lexer is the reference's own
+# hand-written character machine rather than a pattern set.  The stdlib
+# signature table `nsycheck` and `nsyeffect` resolve against is an
+# ARGUMENT the caller supplies, not a generated module in here, so the
+# package does not depend on a compiler release either.

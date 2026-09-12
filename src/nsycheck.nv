@@ -1,0 +1,285 @@
+// nsycheck.nv — what every name in a file refers to.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE SIGNATURE TABLE IS AN ARGUMENT, NOT A MODULE IN HERE, and this
+// is the decision the whole module is shaped around.
+//
+// The harness this package was cut from carries three generated
+// modules — `stdlib_table.nv`, `stdlib_effects.nv`, `prelude_table.nv`,
+// 4,700 lines between them — dumped out of one build of the compiler.
+// That is right for a differential harness, whose entire job is to
+// agree with the compiler it was dumped from.  It is wrong for a
+// published package, three times over:
+//
+//   - it pins the package to one compiler release.  The standard
+//     library grows every release, so a table baked in today answers
+//     "no such function" for whatever landed since, and the only fix
+//     is a new version of THIS package for a change that was not in it;
+//   - it is 4,700 lines of generated data in the public surface that
+//     no consumer can correct.  A reader who knows the answer is
+//     different cannot supply it;
+//   - and it answers the wrong question anyway.  What a language
+//     server has to resolve is a PROJECT: its own modules, its path
+//     dependencies, its registry dependencies at the versions the lock
+//     file pins.  No table shipped in a package can contain those.
+//
+// So `NsySigTable` is a value the caller builds and hands in.
+// `table_of_tree` builds the half that comes from parsed novo-lang
+// source — which is every module in the project and every dependency
+// whose sources are on disk — and a caller with a compiler in the same
+// process (`novols` has one) fills the stdlib half from the registry
+// it already holds.  A caller with neither passes `empty_table()` and
+// gets resolution of everything local, with the rest reported as
+// unknown rather than guessed.
+//
+// THIS IS NOT A TYPE CHECKER, and the boundary is deliberate.
+// Inference, trait selection, monomorphisation and the error-type
+// bound are the compiler's, and a package that did half of them would
+// be a second authority saying something slightly different from
+// `novo build` — which is worse for a reader than saying nothing.
+// What this module answers is RESOLUTION: every name occurrence bound
+// to the declaration it names, every declaration indexed, every impl
+// filed under the key a lookup will use.  That is what go-to-
+// definition, find-references, rename, completion and an outline are
+// made of, and what a hover needs beyond it is the DECLARED type,
+// which resolution also has.
+//
+// NO EFFECTS.
+
+use std.list
+use nsytoken
+use nsyast
+
+// What kind of thing a name names.
+pub enum NsySymKind
+    NsySymFn
+    NsySymStruct
+    NsySymEnum
+    NsySymVariant
+    NsySymTrait
+    NsySymAlias
+    NsySymConst
+    NsySymStatic
+    NsySymModule
+    NsySymField
+    NsySymMethod
+    NsySymAssocType
+    // A `let`, `var` or pattern binding.
+    NsySymLocal
+    NsySymParam
+    NsySymTypeParam
+    // A `register`, `peripheral`, `memory_map`, `vector_table` or
+    // `bsp` declaration.
+    NsySymDevice
+
+// One declared thing.
+//
+// `span` is where it was DECLARED, and an empty span means "declared
+// somewhere this table does not have source for" — a stdlib function a
+// caller supplied from a compiler's registry, a dependency resolved
+// from a manifest.  That is what a go-to-definition reports as "no
+// source available" rather than jumping to offset zero of the file
+// being edited.
+pub struct NsySymbol
+    // The unqualified name.
+    name: Str
+    kind: NsySymKind
+    // The module it lives in — `"str"`, `"nsyast"`, or `""` for
+    // something declared in the file being resolved.
+    module: Str
+    // The name of the type or trait it belongs to, for a field, a
+    // method or an associated type; `""` otherwise.
+    owner: Str
+    // The declared type, where the declaration writes one.
+    ty: ?NsyType
+    // The declared effect clause, for a function or a method.
+    effects: NsyEffects
+    is_pub: Bool
+    span: NsySpan
+
+// One impl, filed under the key a lookup uses.
+//
+// `target_key` is `nsyast.impl_target_key` of the written target, and
+// it is stored because a table is built once and searched many times;
+// `target` is kept beside it because a diagnostic prints the type the
+// author wrote, not the key.
+pub struct NsyImplEntry
+    trait_name: Str
+    target_key: Str
+    target: NsyType
+    module: Str
+    methods: [NsySymbol]
+    effects: NsyEffects
+    span: NsySpan
+
+// Everything resolution can look up.
+//
+// `sorted` is the permutation of `symbols` in name order, so a lookup
+// is a binary search rather than a scan.  Every constructor here
+// builds it, so a caller never has to remember to — which is the
+// difference between a table a language server can ask ten thousand
+// times a second and one it cannot.
+pub struct NsySigTable
+    symbols: [NsySymbol]
+    sorted: [Int]
+    impls: [NsyImplEntry]
+
+// An empty table.  What a caller with no project context passes.
+//
+// ```novo
+// use nsycheck
+//
+// fn main() [io]
+//     println("${list.len(nsycheck.empty_table().symbols)}")
+// ```
+pub fn empty_table() -> NsySigTable
+    todo("novo-syntax.nsycheck.empty_table")
+
+// The table a parsed file contributes: its declarations, its impls,
+// and its fields and methods, all attributed to `module`.
+//
+// How a caller builds the project half of the table — one call per
+// file, then `table_merge`.
+pub fn table_of_tree(src: NsySource, tree: NsyTree, module: Str) -> NsySigTable
+    todo("novo-syntax.nsycheck.table_of_tree")
+
+// Two tables as one, re-sorted.
+//
+// A name in both is kept TWICE rather than resolved here: which one
+// wins depends on the `use` declarations of the file being resolved,
+// and a merge that picked one would have decided it without them.
+// `resolve` is where the decision belongs, and `NsyCkAmbiguous` is
+// what it says when it cannot make it.
+pub fn table_merge(a: NsySigTable, b: NsySigTable) -> NsySigTable
+    todo("novo-syntax.nsycheck.table_merge")
+
+// One symbol added, the index kept in order.
+pub fn table_add(table: NsySigTable, sym: NsySymbol) -> NsySigTable
+    todo("novo-syntax.nsycheck.table_add")
+
+// Every symbol of that name, in any module.
+pub fn table_find(table: NsySigTable, name: Str) -> [NsySymbol]
+    todo("novo-syntax.nsycheck.table_find")
+
+// The symbol of that name in that module, or `None`.
+pub fn table_find_in(table: NsySigTable, module: Str, name: Str) -> ?NsySymbol
+    todo("novo-syntax.nsycheck.table_find_in")
+
+// Every impl of `trait_name` for the type that key names.  `""` as the
+// trait is every impl, inherent ones included.
+pub fn table_impls(table: NsySigTable, trait_name: Str, target_key: Str) -> [NsyImplEntry]
+    todo("novo-syntax.nsycheck.table_impls")
+
+// ── resolution ──────────────────────────────────────────────────────
+
+// What went wrong at a name.
+pub enum NsyCheckKind
+    // Nothing in scope has this name.
+    NsyCkUnknownName
+    // A `use` path that names no module in the table.
+    NsyCkUnknownModule
+    // A `.field` the receiver's type does not declare.
+    NsyCkUnknownField
+    // An enum pattern or constructor naming a variant the enum has
+    // not.
+    NsyCkUnknownVariant
+    // A method call on a type with no such method and no impl
+    // supplying one.
+    NsyCkUnknownMethod
+    // Two declarations of the same name in one scope.
+    NsyCkDuplicate
+    // A name that two `use`s both bring in, with nothing to choose
+    // between them.
+    NsyCkAmbiguous
+    // A call with the wrong number of arguments.  The counts are on
+    // the fault.
+    NsyCkArity
+    // A declaration that shadows a prelude name.  A warning rather
+    // than a refusal: it is legal, and it is also the reason a
+    // program's `map` is not the one the reader expected.
+    NsyCkShadowsPrelude
+    // A binding nothing reads.
+    NsyCkUnused
+
+// One resolution fault.
+//
+// `wanted` and `got` carry the two numbers an arity fault is about and
+// are zero for every other kind — two integers rather than a payload
+// on one variant, so that a consumer rendering a message does not
+// match on the kind twice.
+pub struct NsyCheckFault
+    kind: NsyCheckKind
+    name: Str
+    span: NsySpan
+    wanted: Int
+    got: Int
+
+// One name occurrence, bound.
+//
+// The SYMBOL and not an index into a table: an index is a second fact
+// that has to stay in step with the table it points into, and a
+// consumer that merged two resolutions would have to rebase every one
+// of them.
+pub struct NsyBinding
+    span: NsySpan
+    name: Str
+    symbol: NsySymbol
+
+// What a file's names refer to.
+//
+// `bindings` is in source order, so a query by offset is a binary
+// search and `nsyquery` does not build a second index.
+pub struct NsyResolution
+    bindings: [NsyBinding]
+    faults: [NsyCheckFault]
+    // The table as this file sees it: `table` plus the file's own
+    // declarations, with its `use` declarations applied.  A caller
+    // that resolves a second file in the same module passes this back
+    // in rather than rebuilding it.
+    scope: NsySigTable
+
+// Resolve every name in a file against a table.
+//
+// ```novo
+// use nsytoken
+// use nsyparse
+// use nsycheck
+//
+// fn main() [io]
+//     let s = nsytoken.source("fn main()\n    pass\n")
+//     let r = nsyparse.parse(s)
+//     let res = nsycheck.resolve(s, r.tree, nsycheck.empty_table())
+//     println("${list.len(res.bindings)}")
+// ```
+pub fn resolve(src: NsySource, tree: NsyTree, table: NsySigTable) -> NsyResolution
+    todo("novo-syntax.nsycheck.resolve")
+
+// The binding whose span contains `offset`, or `None`.
+pub fn binding_at(res: NsyResolution, offset: Int) -> ?NsyBinding
+    todo("novo-syntax.nsycheck.binding_at")
+
+// Every occurrence bound to the same declaration as the one at
+// `offset` — what find-references answers, and what a rename edits.
+//
+// The DECLARATION is matched, not the name: two different `x`es in two
+// functions are two answers, and a consumer that matched on the name
+// would rename both.
+pub fn references_at(res: NsyResolution, offset: Int) -> [NsyBinding]
+    todo("novo-syntax.nsycheck.references_at")
+
+// The prelude names a table should be seeded with before resolution.
+//
+// The set novo-lang makes available with no `use` — `println`, `Some`,
+// `Ok`, `Result`, the traits a `@derive` supplies.  A LIST OF NAMES
+// AND NOT A TABLE: the names are the language's and stable, the
+// signatures are the standard library's and are not, so this module
+// knows the first and asks the caller for the second.  A caller that
+// passes an empty table still gets `NsyCkShadowsPrelude` right.
+pub fn prelude_names() -> [Str]
+    todo("novo-syntax.nsycheck.prelude_names")
+
+// A one-line message for a fault, in the compiler's wording where the
+// two raise the same one.
+pub fn fault_message(fault: NsyCheckFault) -> Str
+    todo("novo-syntax.nsycheck.fault_message")

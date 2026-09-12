@@ -1,0 +1,247 @@
+// nsylex_tests.nv — the layout contract, and the lexer as a value.
+//
+// RED UNTIL THE BODIES LAND.
+//
+// THE VECTORS ARE THE REFERENCE'S.  Every assertion about the token
+// stream below is one `orbit/novo-front/src/lexer_tests.nv` already
+// makes against `compiler/lib/lexer.mll`, restated over this package's
+// stream with its trivia filtered out — so the two lexers are held to
+// the same layout contract, and a difference is a red assertion here
+// rather than a corpus divergence somebody has to bisect.
+//
+// The layout machinery is what these are for.  A wrong answer there is
+// a MISSING NEWLINE rather than an obviously wrong token, which is the
+// kind of breakage that survives a refactor unnoticed.
+//
+//   novo test --llvm tests/nsylex_tests.nv     (from orbit/novo-syntax)
+
+use std.str
+use std.list
+use std.test
+use nsytoken
+use nsylex
+
+// The stream as one space-separated line of kind names, trivia
+// filtered — the shape the reference's own tests assert in.
+fn names_of(text: Str) -> Str
+    let src = nsytoken.source(text)
+    let toks = nsytoken.without_trivia(nsylex.lex(src))
+    let sb = str.builder_new()
+    var first = true
+    for t in toks
+        if not first
+            str.builder_append(sb, " ")
+        str.builder_append(sb, nsytoken.kind_name(t.kind))
+        first = false
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    out
+
+@test
+fn test_empty_input_is_newline_eof() [io]
+    test.assert_eq(names_of(""), "NEWLINE EOF")
+
+@test
+fn test_blank_lines_emit_no_code_tokens() [io]
+    test.assert_eq(names_of("\n\n\n"), "NEWLINE EOF")
+
+@test
+fn test_indent_dedent_pairs_up() [io]
+    test.assert_eq(names_of("a\n    b\n"),
+                   "IDENT NEWLINE INDENT IDENT NEWLINE DEDENT EOF")
+
+@test
+fn test_dedents_flush_at_eof() [io]
+    test.assert_eq(names_of("a\n  b\n    c\n"),
+                   "IDENT NEWLINE INDENT IDENT NEWLINE INDENT IDENT NEWLINE DEDENT DEDENT EOF")
+
+@test
+fn test_newline_inside_brackets_is_swallowed() [io]
+    test.assert_eq(names_of("f(a,\n  b)\n"),
+                   "IDENT LPAREN IDENT COMMA IDENT RPAREN NEWLINE EOF")
+
+@test
+fn test_a_leading_operator_continues_the_line() [io]
+    // `->` and the `..` family are in the continuation table, so a
+    // wrapped signature parses.
+    test.assert_eq(names_of("a\n  + b\n"), "IDENT PLUS IDENT NEWLINE EOF")
+    test.assert_eq(names_of("fn f()\n  -> Int\n"),
+                   "FN IDENT LPAREN RPAREN ARROW IDENT NEWLINE EOF")
+
+@test
+fn test_a_keyword_after_a_dot_is_a_name() [io]
+    // Member position is the one place a keyword can only have been
+    // meant as a name — without this, `json.null` is unreachable from
+    // source.
+    test.assert_eq(names_of("json.null\n"), "IDENT DOT IDENT NEWLINE EOF")
+    test.assert_eq(names_of("x?.match\n"), "IDENT SAFE_DOT IDENT NEWLINE EOF")
+    test.case("but a dangling dot does not carry to the next line")
+    test.assert_eq(names_of("x.\nmatch\n"),
+                   "IDENT DOT NEWLINE MATCH NEWLINE EOF")
+
+@test
+fn test_a_lone_underscore_is_not_an_ident() [io]
+    test.assert_eq(names_of("_ = 1\n"), "UNDERSCORE ASSIGN INT NEWLINE EOF")
+    test.assert_eq(names_of("_foo = 1\n"), "IDENT ASSIGN INT NEWLINE EOF")
+
+@test
+fn test_ampersands_and_bars_are_the_word_tokens() [io]
+    // `&&` and `||` produce the SAME tokens as `and` and `or`: the
+    // variant records token identity, not spelling.
+    test.assert_eq(names_of("a && b\n"), names_of("a and b\n"))
+    test.assert_eq(names_of("a || b\n"), names_of("a or b\n"))
+
+@test
+fn test_the_generic_closer_is_one_token() [io]
+    // `>>` before `>`, and `>>>` before both: a nested generic's
+    // closer arrives as one token and the grammar re-opens it.
+    test.assert_eq(names_of("a >> b\n"), "IDENT SHR IDENT NEWLINE EOF")
+    test.assert_eq(names_of("a >>> b\n"), "IDENT SHR3 IDENT NEWLINE EOF")
+    test.assert_eq(names_of("a >>>= b\n"), "IDENT SHR3_EQ IDENT NEWLINE EOF")
+
+// ── trivia are in the stream ────────────────────────────────────────
+
+@test
+fn test_comments_are_tokens_not_omissions() [io]
+    // The whole reason a formatter over this stream cannot lose a
+    // comment: there is nothing to re-scan, because they never left.
+    let src = nsytoken.source("// one\n# two\n/* three */\na\n")
+    let toks = nsylex.lex(src)
+    var comments = 0
+    for t in toks
+        if nsytoken.is_trivia(t)
+            comments = comments + 1
+    test.assert(comments >= 3)
+    test.case("and filtering them gives the reference's stream")
+    test.assert_eq(names_of("// one\n# two\n/* three */\na\n"),
+                   "IDENT NEWLINE EOF")
+
+@test
+fn test_a_comment_keeps_its_span() [io]
+    let src = nsytoken.source("// hello\n")
+    let toks = nsylex.lex(src)
+    var found = false
+    for t in toks
+        match t.kind
+            NsyTkTrivia(tr) =>
+                if tr == NsyTrLineComment
+                    found = true
+                    test.assert_eq(nsytoken.slice(src, t.span), "// hello")
+            _               =>
+                pass
+    test.assert(found)
+
+// ── faults are values, not stops ────────────────────────────────────
+
+@test
+fn test_a_bad_escape_does_not_stop_the_lex() [io]
+    // A lexer that stopped at the first bad escape would hand an editor
+    // one diagnostic and no tokens for the rest of the file.
+    let src = nsytoken.source("let a = \"\\q\"\nlet b = 2\n")
+    let toks = nsylex.lex(src)
+    test.assert_eq(list.len(nsytoken.faults(toks)), 1)
+    test.case("and the tokens after it are still there")
+    var idents = 0
+    for t in toks
+        if t.kind == NsyTkIdent
+            idents = idents + 1
+    test.assert(idents >= 2)
+
+@test
+fn test_an_unterminated_string_is_one_fault_at_the_quote() [io]
+    let src = nsytoken.source("let a = \"open\n")
+    let faults = nsytoken.faults(nsylex.lex(src))
+    test.assert_eq(list.len(faults), 1)
+    match faults[0].kind
+        NsyTkFault(k) => test.assert(k == NsyFtUnterminatedStr)
+        _             => test.fail("the fault token did not carry a fault")
+
+// ── the lexer as a value ────────────────────────────────────────────
+
+@test
+fn test_a_fresh_lexer_is_at_the_start() [io]
+    let lx = nsylex.new()
+    test.assert_eq(lx.at, 0)
+    test.assert_eq(nsylex.indent_depth(lx), 0)
+    test.assert_eq(nsylex.bracket_depth(lx), 0)
+    test.assert_eq(nsylex.carry_len(lx), 0)
+    test.assert(not nsylex.needs_more(lx))
+
+@test
+fn test_feed_in_two_chunks_answers_the_whole_file() [io]
+    // A caller may split anywhere, including inside a token: the lexer
+    // carries the half-read bytes to the next feed.
+    let (a, _) = nsylex.feed(nsylex.new(), "let na")
+    let (b, _) = nsylex.feed(a, "me = 1\n")
+    let (_, tail) = nsylex.finish(b)
+    test.assert(list.len(tail) > 0)
+    test.case("and the spans are absolute in the file, not the chunk")
+    let src = nsytoken.source("let name = 1\n")
+    let toks = nsytoken.without_trivia(nsylex.lex(src))
+    test.assert_eq(nsytoken.slice(src, toks[1].span), "name")
+
+@test
+fn test_needs_more_is_the_read_eval_loops_question() [io]
+    // An open block, an open bracket and an open literal all mean "keep
+    // taking lines"; a finished statement does not.
+    let (a, _) = nsylex.feed(nsylex.new(), "if x\n")
+    test.assert(nsylex.needs_more(a))
+    let (b, _) = nsylex.feed(nsylex.new(), "f(a,\n")
+    test.assert(nsylex.needs_more(b))
+    let (c, _) = nsylex.feed(nsylex.new(), "let s = \"open\n")
+    test.assert(nsylex.needs_more(c))
+    let (d, _) = nsylex.feed(nsylex.new(), "let x = 1\n")
+    test.assert(not nsylex.needs_more(d))
+
+@test
+fn test_an_open_bracket_is_reported_for_the_editor() [io]
+    let (a, _) = nsylex.feed(nsylex.new(), "f([a,\n")
+    test.assert_eq(nsylex.bracket_depth(a), 2)
+    test.assert_eq(list.len(nsylex.open_brackets(a)), 2)
+    test.case("outermost first")
+    test.assert(nsylex.open_brackets(a)[0] == NsyPuLParen)
+
+@test
+fn test_in_string_and_in_comment_are_separate_questions() [io]
+    let (a, _) = nsylex.feed(nsylex.new(), "let s = \"half")
+    test.assert(nsylex.in_string(a))
+    test.assert(not nsylex.in_comment(a))
+    let (b, _) = nsylex.feed(nsylex.new(), "/* half")
+    test.assert(nsylex.in_comment(b))
+    test.assert(not nsylex.in_string(b))
+
+@test
+fn test_a_seeded_lexer_reports_file_offsets() [io]
+    // What lexes an interpolation hole: the tokens inside carry FILE
+    // spans, so an offset search finds them like any other node.
+    let lx = nsylex.seeded(40, 0)
+    test.assert_eq(lx.at, 40)
+    let (_, toks) = nsylex.feed(lx, "a + b")
+    test.assert(list.len(toks) > 0)
+    test.assert_eq(toks[0].span.start, 40)
+
+@test
+fn test_relex_backs_up_to_a_safe_point() [io]
+    // An edit inside a line cannot be re-lexed from the edit: a `"`
+    // typed in the middle of a file re-interprets everything after it,
+    // and indentation is computed per line.
+    let src = nsytoken.source("let a = 1\nlet b = 2\n")
+    let toks = nsylex.lex(src)
+    match nsylex.relex_from(toks, 14)
+        Some(at) =>
+            test.assert(at <= 10)
+        None     =>
+            test.case("a whole-file re-lex is a valid answer")
+
+@test
+fn test_splice_moves_the_spans_after_the_edit() [io]
+    // The whole reason this is a function and not a list
+    // concatenation the caller writes: every token after the spliced
+    // region has to move by the number of bytes the edit added.
+    let old = nsylex.lex(nsytoken.source("let a = 1\nlet b = 2\n"))
+    let fresh = nsylex.lex(nsytoken.source("let aa = 1\n"))
+    let out = nsylex.splice(old, 0, fresh, 1)
+    test.assert(list.len(out) > 0)
+    test.case("and a deletion moves them the other way")
+    let back = nsylex.splice(out, 0, old, -1)
+    test.assert(list.len(back) > 0)

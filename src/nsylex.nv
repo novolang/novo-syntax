@@ -1,0 +1,270 @@
+// nsylex.nv — the lexer, as a value.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// FEED AND DRAIN.  `feed` takes the next run of bytes and answers a
+// new lexer and the tokens that run completed; `finish` closes the
+// file — the final NEWLINE, every outstanding DEDENT, and the EOF.
+// `lex` is the whole-file convenience over the two.  That is the shape
+// `docs/publishing.md` § How a `core` package takes bytes from its
+// host calls feed-and-drain, and it is right here for the reason it is
+// right for csv-nv: a token is small, the stream is sequential, and
+// nothing has to accumulate.
+//
+// WHY THE LEXER IS A VALUE AND NOT A FUNCTION.  The reference front
+// end lexes a whole file in one call because that is what a batch
+// compiler needs.  Three consumers need less than that and cannot get
+// it from a whole-file call:
+//
+//   - a language server re-lexes on a keystroke, and the answer to
+//     "is this file still inside a string literal?" is the lexer's
+//     state, not its output;
+//   - a read-eval loop has to know whether the line the user just
+//     typed finished a block — `nsylex.needs_more` is that question,
+//     and it is a field read rather than a re-parse;
+//   - an interpolation hole is lexed by THIS lexer seeded to the
+//     hole's file offset, so the machine has to be constructible at a
+//     position other than the start of a file.
+//
+// THE INDENTATION MACHINERY IS THE CONTRACT.  A lexer that emitted
+// only the tokens an author typed would be testing almost nothing:
+// NEWLINE synthesis, INDENT/DEDENT, newline suppression inside
+// brackets, the block-lambda escape from that suppression, and
+// leading-operator line continuation are what the language's layout
+// IS.  Every one of them is a field on `NsyLexer` below, named for
+// what it does.
+//
+// NO EFFECTS.  Nothing here reads a file, and there is deliberately no
+// effect-polymorphic `lex_from<S: Read[e]>` entry point: a span is a
+// byte range into source the caller holds, so a caller who streamed
+// the bytes past this package and did not keep them could not resolve
+// a single token it got back.  The honest API is the one that makes
+// the caller hold the text — see the README, § Why no stream flows
+// through.
+
+use std.list
+use nsytoken
+
+// The lexer's state, between two feeds.
+//
+// The fields are the reference lexer's own registers, and they are
+// public because a consumer asks them questions: a read-eval loop
+// reads `indent` and `brackets` to decide whether to keep taking
+// lines, and a language server reads `carry_len` to know how much of
+// the last edit it has to re-lex.  They are not a stable ABI — a
+// caller that constructs one by hand rather than through `new` or
+// `seeded` is on its own — which is what `nsylex.new` exists to say.
+pub struct NsyLexer
+    // Byte offset, in the caller's file, of the next byte `feed` will
+    // read.  Every span this lexer emits is absolute in those
+    // coordinates, which is what lets a hole's token run be found by
+    // the same offset search as the rest of the file.
+    at: Int
+    // The bytes of the token currently half-read, retained from the
+    // previous feed.  A chunk boundary in the middle of a string
+    // literal or a number is the only reason this is ever non-empty,
+    // and `carry_len` is what a caller watches to see it happen.
+    carry: Str
+    // The indentation stack, in columns, deepest last.  `[0]` at the
+    // start of a file and `[0]` again at a clean end.
+    indent: [Int]
+    // The brackets still open, innermost last.  A closer that does not
+    // match the last one is `NsyFtUnbalancedBracket`; newline
+    // synthesis is suppressed while this is non-empty.
+    brackets: [NsyPunct]
+    // The depth `indent` had when each bracket opened, so a block
+    // lambda inside a call restores the right level when its bracket
+    // closes.
+    bracket_indent: [Int]
+    // The bracket depths at which a `match` is still waiting for the
+    // newline that ends its SUBJECT.  A stack, not a flag, because
+    // `f(match g(match y …` nests.  Without it a `match` written
+    // inside a call reached the parser with no arm structure at all,
+    // since indentation is suppressed inside brackets.
+    match_wait: [Int]
+    // Tokens synthesised but not yet handed out.  Layout tokens are
+    // queued and drained one at a time, and the flags below are
+    // updated when a token is HANDED OUT rather than when it is
+    // queued — an ordering that is load-bearing, because the
+    // indentation counter reads `line_opens_block` while the NEWLINE
+    // is still in this queue.
+    pending: [NsyToken]
+    // True while the lexer is counting a fresh line's leading
+    // whitespace rather than reading tokens.
+    counting: Bool
+    // The column reached so far while counting.
+    column: Int
+    // This line has handed out a token that opens an indented body.
+    line_opens_block: Bool
+    // This line has handed out a `then` at bracket depth zero, which
+    // is what marks an inline ternary and stops `else` from opening a
+    // block.
+    line_has_then: Bool
+    // The previous handed-out token was `.` or `?.`.  Member position
+    // is the one place a keyword can only have been meant as a name,
+    // so the whole reserved table is admitted as an identifier there —
+    // without it, `json.null` is unreachable from source.
+    after_dot: Bool
+    // The previous handed-out token was `=>`, which is how a block
+    // lambda escapes the newline suppression its enclosing bracket
+    // imposes.
+    after_fat_arrow: Bool
+    // `finish` has run: no further feed is accepted.
+    closed: Bool
+
+// A lexer positioned at the start of a file.
+//
+// ```novo
+// use nsylex
+//
+// fn main() [io]
+//     println("${nsylex.new().at}")
+// ```
+pub fn new() -> NsyLexer
+    todo("novo-syntax.nsylex.new")
+
+// A lexer positioned at an arbitrary byte offset in a file.
+//
+// What lexes an interpolation hole: `"n=${a + b}"` has its body lexed
+// by a lexer seeded to the body's real offset, so the tokens inside
+// the hole carry FILE spans and `nsyquery.token_at` finds them with
+// the same search it uses everywhere else.  Seeding is also what a
+// language server uses to re-lex a single edited region without
+// re-reading the lines above it.
+//
+// The indentation stack starts at the column the offset's line began
+// at, which the caller supplies as `column`; a hole is lexed with
+// `column = 0` because an interpolation body has no layout of its own.
+pub fn seeded(offset: Int, column: Int) -> NsyLexer
+    todo("novo-syntax.nsylex.seeded")
+
+// Feed the next run of bytes; take the tokens it completed.
+//
+// The chunk is appended to whatever the previous feed could not
+// finish, so a caller may split the file anywhere — including inside a
+// string literal or a `/* … */` comment.  Tokens come back in source
+// order with absolute spans.
+//
+// A chunk that completes no token answers an empty list and a lexer
+// whose `carry` has grown; that is normal and not an error.
+//
+// ```novo
+// use nsylex
+//
+// fn main() [io]
+//     let (lx, toks) = nsylex.feed(nsylex.new(), "fn main()\n")
+//     println("${list.len(toks)}")
+// ```
+pub fn feed(lx: NsyLexer, chunk: Str) -> (NsyLexer, [NsyToken])
+    todo("novo-syntax.nsylex.feed")
+
+// Close the stream: the final NEWLINE if the file did not end on one,
+// one DEDENT per open indentation level, and the EOF.
+//
+// A `carry` that is still non-empty is an unterminated literal or
+// comment, and comes back as the matching fault token before the EOF
+// rather than as a silent truncation.
+pub fn finish(lx: NsyLexer) -> (NsyLexer, [NsyToken])
+    todo("novo-syntax.nsylex.finish")
+
+// Lex a whole source in one call.
+//
+// The convenience `nsyparse` and every batch consumer uses:
+// `feed` once with the whole text, then `finish`.  Trivia are in the
+// stream; `nsytoken.without_trivia` is the filter that takes them out.
+//
+// ```novo
+// use nsytoken
+// use nsylex
+//
+// fn main() [io]
+//     let toks = nsylex.lex(nsytoken.source("pass\n"))
+//     println("${list.len(toks)}")
+// ```
+pub fn lex(src: NsySource) -> [NsyToken]
+    todo("novo-syntax.nsylex.lex")
+
+// ── asking the machine ──────────────────────────────────────────────
+
+// How many indentation levels are open.  Zero at the start and end of
+// a well-formed file.
+pub fn indent_depth(lx: NsyLexer) -> Int
+    todo("novo-syntax.nsylex.indent_depth")
+
+// How many brackets are open.  Non-zero means newline synthesis is
+// suppressed, which is why a `match` inside a call needs `match_wait`.
+pub fn bracket_depth(lx: NsyLexer) -> Int
+    todo("novo-syntax.nsylex.bracket_depth")
+
+// How many bytes of a half-read token the lexer is holding.
+pub fn carry_len(lx: NsyLexer) -> Int
+    todo("novo-syntax.nsylex.carry_len")
+
+// Would more input continue what has been fed so far?
+//
+// A READ-EVAL LOOP'S WHOLE QUESTION, and the reason the lexer is a
+// value.  True when an indentation level is open, a bracket is
+// unclosed, a string literal or block comment is unterminated, or the
+// last line ended on a continuation operator — which is exactly the
+// set of states in which a terminal should print a continuation prompt
+// instead of evaluating.  A caller that answered it by trying to parse
+// and watching for an error would print a diagnostic for every
+// half-typed block.
+//
+// ```novo
+// use nsylex
+//
+// fn main() [io]
+//     let (lx, _) = nsylex.feed(nsylex.new(), "if x\n")
+//     println("${nsylex.needs_more(lx)}")
+// ```
+pub fn needs_more(lx: NsyLexer) -> Bool
+    todo("novo-syntax.nsylex.needs_more")
+
+// Is the lexer inside a string literal right now?
+//
+// Separate from `needs_more` because an editor uses it for something
+// else: a `"` typed at this position closes a literal rather than
+// opening one, and a bracket typed inside one should not be
+// auto-paired.
+pub fn in_string(lx: NsyLexer) -> Bool
+    todo("novo-syntax.nsylex.in_string")
+
+// Is the lexer inside a `/* … */` comment right now?
+pub fn in_comment(lx: NsyLexer) -> Bool
+    todo("novo-syntax.nsylex.in_comment")
+
+// The brackets still open, outermost first — what an editor draws the
+// rainbow with, and what a "closes nothing" diagnostic names.
+pub fn open_brackets(lx: NsyLexer) -> [NsyPunct]
+    todo("novo-syntax.nsylex.open_brackets")
+
+// ── re-lexing an edit ───────────────────────────────────────────────
+
+// The offset a re-lex has to start from to be correct after an edit at
+// `offset`.
+//
+// The answer is the start of the token run that contains `offset`
+// backed up past anything whose lexing depends on what precedes it: a
+// literal's opening quote, a block comment's opener, and the start of
+// the line, since indentation is computed per line.  A language server
+// that re-lexed from the edit itself gets a different stream, because
+// a `"` typed in the middle of a file re-interprets everything after
+// it.
+//
+// `None` when nothing before the edit can be reused and the file has
+// to be lexed from the top — which is what a large paste or an edit
+// inside an unterminated literal means.
+pub fn relex_from(toks: [NsyToken], offset: Int) -> ?Int
+    todo("novo-syntax.nsylex.relex_from")
+
+// Splice a freshly lexed run into an existing stream.
+//
+// `old` is the previous token list, `at` the offset `relex_from`
+// answered, `fresh` the tokens a lexer seeded there produced, and
+// `shift` the number of bytes the edit added (negative for a
+// deletion).  Every token after the spliced region has its span moved
+// by `shift`, which is the whole reason this is a function rather than
+// a list concatenation the caller writes.
+pub fn splice(old: [NsyToken], at: Int, fresh: [NsyToken], shift: Int) -> [NsyToken]
+    todo("novo-syntax.nsylex.splice")

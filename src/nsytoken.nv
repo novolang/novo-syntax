@@ -1,0 +1,659 @@
+// nsytoken.nv — what a token is, and what a position is.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THREE DECISIONS LIVE IN THIS MODULE, and the rest of the package is
+// downstream of them.
+//
+// 1. A SPAN IS A BYTE RANGE INTO THE CALLER'S SOURCE.  A token carries
+//    `NsySpan { start, stop }` and no text.  That is what makes the
+//    package `core`: it never owns a copy of the file, so lexing a
+//    100 KB module allocates one list of small records rather than one
+//    `Str` per identifier.  It is also what makes the formatter
+//    possible at all — the spelling an author wrote is IN the source,
+//    and a token that carried a decoded payload has already thrown it
+//    away.  `NsySource` is the pairing of that text with its line
+//    table, and every function that needs to look at bytes takes one.
+//
+// 2. TRIVIA ARE TOKENS.  Comments and blank lines are in the stream,
+//    in source order, with their spans, rather than skipped.  The
+//    reference front end drops them in the lexer, and the consequence
+//    is visible in the compiler today: `novo fmt` re-scans the raw
+//    source with its own comment scanner and re-interleaves what it
+//    finds around a printed tree.  That scanner has to know all three
+//    comment spellings — `//`, `#` and `/* … */` — and a version that
+//    knew only the first deleted every other comment in the file with
+//    no diagnostic and exit 0.  A formatter over this stream cannot
+//    have that bug, because there is nothing to re-scan.
+//
+// 3. A LEXICAL ERROR IS A TOKEN.  `NsyTkFault` sits in the stream at
+//    the span that went wrong and lexing continues.  A lexer that
+//    stopped at the first bad escape would hand a language server one
+//    diagnostic and no tokens for the rest of the file, which is the
+//    state a file is in for most of the time anyone is typing in it.
+//
+// NO EFFECTS, and no file: a caller who has a path reads it.
+
+use std.str
+use std.list
+
+// ── source and position ─────────────────────────────────────────────
+
+// A half-open byte range into the source: `start` is the first byte,
+// `stop` is one past the last.  An empty span has `start == stop`,
+// which is what an insertion point is and what a zero-width layout
+// token gets.
+//
+// Not a `@value` struct, deliberately.  A span is a field of
+// `NsyToken`, which is a boxed struct, and SPEC § 14.7 refuses a
+// `@value` aggregate in that position; the copy this would save is two
+// machine words.
+//
+// ```novo
+// use nsytoken
+//
+// fn main() [io]
+//     println("${nsytoken.span_len(NsySpan { start: 4, stop: 9 })}")
+// ```
+pub struct NsySpan
+    start: Int
+    stop: Int
+
+// A line and a column, the way an editor counts them: `line` is
+// 1-based, `col` is a 0-BASED BYTE offset within the line.
+//
+// Bytes, not characters, and not UTF-16 code units.  That is the
+// reference front end's convention (`pos_cnum - pos_bol`), so a
+// diagnostic from this package and a diagnostic from `novo build`
+// point at the same column.  A language server speaking LSP converts
+// to UTF-16 at its own boundary, which is where the client's encoding
+// negotiation is known — this package cannot know it.
+//
+// ```novo
+// use nsytoken
+//
+// fn main() [io]
+//     let lc = NsyLineCol { line: 3, col: 0 }
+//     println("${lc.line}")
+// ```
+pub struct NsyLineCol
+    line: Int
+    col: Int
+
+// The caller's source text with its line table.
+//
+// THE LOAD-BEARING VALUE OF THE PACKAGE.  Every entry point takes one
+// of these rather than a bare `Str`, and the reason is that a span is
+// only half an answer: `start: 4021` is what the lexer can afford to
+// carry, and `line 118, column 6` is what a person reads.  Converting
+// between them costs a scan of the file unless somebody has built the
+// table, and the place to build it once is here, at the point the
+// source enters the package.
+//
+// `line_starts` holds the byte offset of the first character of each
+// line, so `line_starts[0]` is 0 and the length is the number of
+// lines.  A binary search over it is `line_col`; an index into it is
+// `offset_at`.
+//
+// ```novo
+// use nsytoken
+//
+// fn main() [io]
+//     let s = nsytoken.source("fn main()\n    pass\n")
+//     println("${list.len(s.line_starts)}")
+// ```
+pub struct NsySource
+    text: Str
+    line_starts: [Int]
+
+// Build the source value and its line table.
+//
+// One pass over the text.  A caller that parses the same file twice
+// should build this once and pass it to both calls.
+//
+// ```novo
+// use nsytoken
+//
+// fn main() [io]
+//     println("${str.len(nsytoken.source("pass\n").text)}")
+// ```
+pub fn source(text: Str) -> NsySource
+    todo("novo-syntax.nsytoken.source")
+
+// The bytes a span covers, as a fresh `Str`.
+//
+// The one allocating function in this module, and it is the caller's
+// choice to call it — an identifier's text, a literal's spelling, the
+// body of an interpolation hole.  Everything inside the package works
+// on spans and does not call this.
+pub fn slice(src: NsySource, sp: NsySpan) -> Str
+    todo("novo-syntax.nsytoken.slice")
+
+// The line and column a byte offset falls on.  An offset past the end
+// answers the position one past the last byte, which is where a
+// completion request at end of file arrives.
+pub fn line_col(src: NsySource, offset: Int) -> NsyLineCol
+    todo("novo-syntax.nsytoken.line_col")
+
+// The byte offset a line and column name, or `None` when the line does
+// not exist or the column is past that line's end.
+//
+// `None` rather than a clamp, because an editor that sends a stale
+// position after an edit it has not told the server about should be
+// answered "that is not a place in this file" rather than handed a
+// plausible node somewhere else.
+pub fn offset_at(src: NsySource, lc: NsyLineCol) -> ?Int
+    todo("novo-syntax.nsytoken.offset_at")
+
+// The span of a whole line, its terminator excluded.
+pub fn line_span(src: NsySource, line: Int) -> ?NsySpan
+    todo("novo-syntax.nsytoken.line_span")
+
+// How many bytes a span covers.
+pub fn span_len(sp: NsySpan) -> Int
+    todo("novo-syntax.nsytoken.span_len")
+
+// Does the span contain the offset?  Half-open: `start <= off < stop`.
+// An empty span contains nothing, which is why `nsyquery` asks about
+// enclosure with its own rule for the zero-width case.
+pub fn span_holds(sp: NsySpan, offset: Int) -> Bool
+    todo("novo-syntax.nsytoken.span_holds")
+
+// The smallest span covering both.  The parser's node spans are built
+// with this: a node runs from the first byte of its first token to the
+// last byte of its last one.
+pub fn span_join(a: NsySpan, b: NsySpan) -> NsySpan
+    todo("novo-syntax.nsytoken.span_join")
+
+// ── keywords ────────────────────────────────────────────────────────
+
+// Every reserved word novo-lang has, as a closed set.
+//
+// AN ENUM RATHER THAN A STRING, and this is the first place the split
+// from novo-front shows.  The harness in `orbit/novo-front` carries
+// keywords as `TKeyword(name: Str)` because its output is a text dump
+// whose format is fixed by the compiler's `novo parse --tokens`; the
+// name IS the answer there.  A library's consumers ask a different
+// question — "is this token `fn`?" — and a string comparison answers
+// it with a typo the compiler cannot see.  The set is closed by SPEC
+// § 1.4, so it can be a type.
+//
+// `NsyKwUnderscore` is in here rather than in `NsyPunct` for the
+// reference's own reason: a lone `_` is decided inside the function
+// that classifies a WORD (`ident_or_kw`), not by the character
+// classes, which is what keeps `_foo`, `a_b` and `1_000_000` from
+// being cut at their underscores.
+//
+// `NsyKwAnd` and `NsyKwOr` are produced by two spellings each — `and`
+// and `&&`, `or` and `||` — because the variant records token
+// IDENTITY and the two spellings are the same token.  `nsytoken.slice`
+// on the span is what tells a formatter which one was written.
+//
+// `frame` is deliberately absent: it is a CONTEXTUAL keyword that
+// reaches the parser as an identifier and is recognised there by
+// spelling, exactly as the reference does it.
+pub enum NsyKeyword
+    NsyKwAlias
+    NsyKwAnd
+    NsyKwAs
+    NsyKwAsm
+    NsyKwAsync
+    NsyKwAwait
+    NsyKwBreak
+    NsyKwBsp
+    NsyKwConst
+    NsyKwContinue
+    NsyKwDyn
+    NsyKwElif
+    NsyKwElse
+    NsyKwEnum
+    NsyKwErrorKind
+    NsyKwFalse
+    NsyKwFn
+    NsyKwFor
+    NsyKwIf
+    NsyKwImpl
+    NsyKwIn
+    NsyKwLet
+    NsyKwLoop
+    NsyKwMatch
+    NsyKwMemoryMap
+    NsyKwMut
+    NsyKwNot
+    NsyKwNull
+    NsyKwOr
+    NsyKwPass
+    NsyKwPeripheral
+    NsyKwPrompt
+    NsyKwPub
+    NsyKwRegister
+    NsyKwReturn
+    NsyKwSelf
+    NsyKwStateMachine
+    NsyKwStatic
+    NsyKwStruct
+    NsyKwSystem
+    NsyKwThen
+    NsyKwTrait
+    NsyKwTrue
+    NsyKwType
+    NsyKwUnderscore
+    NsyKwUnsafeDischarge
+    NsyKwUse
+    NsyKwVar
+    NsyKwVectorTable
+    NsyKwWeak
+    NsyKwWhile
+
+// The keyword a word spells, or `None` when the word is an ordinary
+// identifier.
+//
+// ```novo
+// use nsytoken
+//
+// fn main() [io]
+//     match nsytoken.keyword_of("match")
+//         Some(k) => println(nsytoken.keyword_text(k))
+//         None    => println("not a keyword")
+// ```
+pub fn keyword_of(word: Str) -> ?NsyKeyword
+    todo("novo-syntax.nsytoken.keyword_of")
+
+// The canonical spelling of a keyword — `NsyKwErrorKind` is
+// `"error_kind"`, and every other multi-word reserved name is spelled
+// the same way.  `NsyKwAnd` and `NsyKwOr` answer the WORD spelling,
+// because that is the one a canonical printer writes.
+pub fn keyword_text(kw: NsyKeyword) -> Str
+    todo("novo-syntax.nsytoken.keyword_text")
+
+// Can this keyword open an indented block on the line it appears on?
+//
+// The KIND alone is not the whole test and this function does not
+// pretend otherwise — every lexeme in the set also has a spelling that
+// opens nothing (an inline ternary's `if`, a comprehension's `for`).
+// `nsylex` applies the two facts that settle it: bracket depth zero,
+// and no `then` yet on the line.
+pub fn keyword_opens_block(kw: NsyKeyword) -> Bool
+    todo("novo-syntax.nsytoken.keyword_opens_block")
+
+// ── punctuation ─────────────────────────────────────────────────────
+
+// Every operator and delimiter, as a closed set, in the longest-match
+// order the lexer resolves them in.
+//
+// `NsyPuPipe` is `|>` and `NsyPuPipeChar` is a bare `|`; the two
+// carry the reference's own names so that a reader moving between this
+// package and `compiler/lib/lexer.mll` is not translating.  `&&` and
+// `||` are NOT here — they lex to `NsyKwAnd` and `NsyKwOr`.
+pub enum NsyPunct
+    NsyPuAmp
+    NsyPuAmpEq
+    NsyPuArrow
+    NsyPuAssign
+    NsyPuAt
+    NsyPuBang
+    NsyPuCaret
+    NsyPuCaretEq
+    NsyPuColon
+    NsyPuComma
+    NsyPuDot
+    NsyPuDotDot
+    NsyPuDotDotDot
+    NsyPuDotDotEq
+    NsyPuEqEq
+    NsyPuFatArrow
+    NsyPuGeq
+    NsyPuGt
+    NsyPuLBrace
+    NsyPuLBracket
+    NsyPuLeq
+    NsyPuLParen
+    NsyPuLt
+    NsyPuMinus
+    NsyPuMinusEq
+    NsyPuNeq
+    NsyPuNullCoal
+    NsyPuPercent
+    NsyPuPercentEq
+    NsyPuPipe
+    NsyPuPipeChar
+    NsyPuPipeEq
+    NsyPuPlus
+    NsyPuPlusEq
+    NsyPuPlusPlus
+    NsyPuQuestion
+    NsyPuRBrace
+    NsyPuRBracket
+    NsyPuRParen
+    NsyPuSafeDot
+    NsyPuSemi
+    NsyPuShl
+    NsyPuShlEq
+    NsyPuShr
+    NsyPuShr3
+    NsyPuShr3Eq
+    NsyPuShrEq
+    NsyPuSlash
+    NsyPuSlashEq
+    NsyPuStar
+    NsyPuStarEq
+    NsyPuTilde
+
+// The spelling of a punctuation token — `NsyPuShr3Eq` is `">>>="`.
+pub fn punct_text(pu: NsyPunct) -> Str
+    todo("novo-syntax.nsytoken.punct_text")
+
+// Does this punctuation open a bracket, and if so which one closes it?
+//
+// `nsylex` suppresses newline synthesis inside brackets, so it needs
+// the pairing; `nsyquery` needs it to answer "what encloses this
+// offset" on a file that does not parse.
+pub fn punct_opens(pu: NsyPunct) -> ?NsyPunct
+    todo("novo-syntax.nsytoken.punct_opens")
+
+// Is this punctuation a closing bracket?
+pub fn punct_closes(pu: NsyPunct) -> Bool
+    todo("novo-syntax.nsytoken.punct_closes")
+
+// Does a line that STARTS with this operator continue the line before
+// it?
+//
+// The set is strictly smaller than `NsyPunct` and the exclusions are
+// the reference's: `=>`, `=`, `!`, `?`, `:`, `@`, a bare `|`, and
+// every bracket are not continuations.  `->` and the `..` family are.
+pub fn punct_continues_line(pu: NsyPunct) -> Bool
+    todo("novo-syntax.nsytoken.punct_continues_line")
+
+// ── trivia ──────────────────────────────────────────────────────────
+
+// The three comment spellings the language has, plus the blank line.
+//
+// A BLANK LINE IS TRIVIA, not nothing.  A formatter that dropped them
+// would join every paragraph of a file into one block, and a
+// formatter that kept all of them would never normalise three blank
+// lines to one.  Carrying the run as a token with a span lets the
+// printer decide, and lets it decide differently inside a body than
+// between declarations.
+pub enum NsyTrivia
+    // `// … ` to end of line.  The span covers the slashes.
+    NsyTrLineComment
+    // `# … ` to end of line.
+    NsyTrHashComment
+    // `/* … */`, possibly spanning lines.  The span covers both
+    // delimiters.
+    NsyTrBlockComment
+    // One or more consecutive empty lines.  The span covers all of
+    // them, so `span_len` divided by the line length is not the count
+    // — `nsytoken.line_col` on `start` and `stop` is.
+    NsyTrBlankLines
+
+// Is this a doc comment — a `//` run that a declaration follows?
+//
+// A SPAN TEST rather than a spelling test, because novo-lang has no
+// `///` marker: a doc comment is an ordinary comment whose position
+// makes it one, which is what `novo doc` already reads. The answer
+// needs the token stream, so it lives in `nsyquery` rather than here;
+// this function is the spelling half, and says only whether the
+// trivia could be one.
+pub fn trivia_can_document(tr: NsyTrivia) -> Bool
+    todo("novo-syntax.nsytoken.trivia_can_document")
+
+// ── literals ────────────────────────────────────────────────────────
+
+// How a string literal was written.  The three forms lex differently
+// and print differently, and a formatter that lost the distinction
+// would rewrite a triple-quoted block into one escaped line.
+pub enum NsyStrForm
+    // `"…"`
+    NsyStrPlain
+    // `"""…"""` — dedented by the common leading whitespace of its
+    // lines, so its VALUE is not its source spelling.
+    NsyStrTriple
+    // `'c'` — a character literal, whose value is an integer.  It is a
+    // string form because it is lexed by the same machinery; the
+    // parser turns it into an integer literal, and `nsyprint` puts the
+    // quotes back from the span.
+    NsyStrChar
+
+// One piece of a string literal: a run of literal text, or the body of
+// an interpolation.
+//
+// BOTH ARMS CARRY SPANS AND NEITHER CARRIES TEXT.  A literal run's
+// span covers the SOURCE bytes, escapes not yet applied, which is what
+// the formatter needs; `nsytoken.unescape_into` is how a consumer that
+// wants the value gets it.  Holding decoded text here would have cost
+// an allocation per run on every lex of every file, for a value most
+// callers — the formatter, the language server's outline, the
+// tree-sitter corpus check — never look at.
+//
+// `NsySegHole` carries the interpolation's own TOKEN RUN, lexed by the
+// same lexer seeded to the hole's file offset.  That is what makes
+// `"count=${a + b}"` a place a language server can complete inside,
+// and it is why a hole is not merely a span: the tokens are already
+// there, positioned in file coordinates, so `nsyquery.token_at` finds
+// them without a second lex.
+pub enum NsyStrSeg
+    // A literal run.  The span is the SOURCE text between the escapes
+    // and the delimiters, so `\n` appears in it as two bytes.
+    NsySegLit(span: NsySpan)
+    // A `${…}` or `$ident` interpolation.  `span` covers the body
+    // alone, delimiters excluded; `tokens` is that body lexed.
+    NsySegHole(span: NsySpan, tokens: [NsyToken])
+
+// The radix an integer literal was written in.  Carried because the
+// value does not imply it: `255`, `0xFF` and `0b11111111` are one
+// number and three spellings, and a register map transcribed from a
+// datasheet stops lining up when a printer renders them all as
+// decimal.
+pub enum NsyRadix
+    NsyRadixDec
+    NsyRadixHex
+    NsyRadixBin
+
+// ── lexical faults ──────────────────────────────────────────────────
+
+// What was wrong with the bytes, named.
+//
+// Every one of these is a token in the stream rather than a stop, and
+// the span is the smallest run of source that is wrong — the escape,
+// not the string; the character, not the line.
+pub enum NsyFaultKind
+    // A byte that begins no token.
+    NsyFtUnexpectedByte
+    // A `"` or `"""` with no closer before end of file.
+    NsyFtUnterminatedStr
+    // A `'` with no closer, or one holding more than a character.
+    NsyFtUnterminatedChar
+    // A `/*` with no `*/` before end of file.
+    NsyFtUnterminatedComment
+    // A `\x` the language does not define.
+    NsyFtUnknownEscape
+    // `\u{` with no closing brace.
+    NsyFtIncompleteUnicode
+    // `\u{…}` whose body is not hexadecimal.
+    NsyFtBadUnicodeDigits
+    // `\u{…}` above U+10FFFF.
+    NsyFtUnicodeOutOfRange
+    // `\u{D800}`–`\u{DFFF}`: a surrogate half is not a scalar value.
+    NsyFtUnicodeSurrogate
+    // A `\u{…}` above U+007F in a CHARACTER literal, whose value is
+    // one byte.
+    NsyFtUnicodeNotAscii
+    // A backslash inside a `${…}` body.  Refused rather than decoded,
+    // because an escape there would have to be applied twice — once by
+    // the string lexer and once by the expression lexer — and the two
+    // passes disagree about what `\\n` meant.
+    NsyFtBackslashInHole
+    // A `${` with no closing brace before the string ends.
+    NsyFtUnterminatedHole
+    // An integer literal above the language's 64-bit range.
+    NsyFtIntOutOfRange
+    // A number with a digit the radix does not have, or an exponent
+    // with no digits.
+    NsyFtMalformedNumber
+    // A `)`, `]` or `}` closing nothing, or closing the wrong opener.
+    NsyFtUnbalancedBracket
+    // Indentation that is neither the current level nor any level on
+    // the stack — a dedent to a column no enclosing block used.
+    NsyFtInconsistentIndent
+    // A tab in the indentation of a line.  The language counts columns
+    // in bytes, so a tab makes the count depend on a setting the file
+    // does not carry.
+    NsyFtTabInIndent
+
+// A one-line description of a fault, for a diagnostic's message.  The
+// wording matches the compiler's own for the faults both can raise, so
+// a reader who has seen one has seen the other.
+pub fn fault_message(kind: NsyFaultKind) -> Str
+    todo("novo-syntax.nsytoken.fault_message")
+
+// ── the token ───────────────────────────────────────────────────────
+
+// What a token IS.
+//
+// Payload-free where the span is the whole story — an identifier's
+// text is `nsytoken.slice` of its span, so `NsyTkIdent` carries
+// nothing — and payload-bearing exactly where the lexer computed
+// something a re-read of the source would have to redo: a number's
+// value and radix, a string's segmentation, a fault's kind.
+//
+// THE LAYOUT TOKENS ARE VARIANTS, not punctuation with a name.  They
+// are not written in the source at all; they are the indentation
+// contract made explicit, and every consumer branches on them by
+// identity. Their spans are EMPTY — `start == stop` at the byte the
+// synthesis happened at — which is how a consumer tells a synthesised
+// token from a written one without a flag.
+pub enum NsyTokKind
+    NsyTkIdent
+    NsyTkKeyword(kw: NsyKeyword)
+    NsyTkPunct(pu: NsyPunct)
+    // An integer literal that fits 64 bits, with the radix it was
+    // written in.  `raw_digits` is the span of the digits alone,
+    // separators and prefix excluded, so a printer can restore
+    // `0x00FF` and `1_000_000`.
+    NsyTkInt(value: Int, radix: NsyRadix, digits: NsySpan)
+    // The bare 2^63 literal, legal only directly under a unary minus.
+    // A variant rather than an `NsyTkInt` because the value does not
+    // fit the type that would carry it, and a parser that saw
+    // `NsyTkInt(-9223372036854775808)` could not tell it from a
+    // negation the author wrote.
+    NsyTkIntMin
+    NsyTkFloat(value: Float)
+    NsyTkStr(form: NsyStrForm, segs: [NsyStrSeg])
+    // End of a logical line.  Suppressed inside brackets, and one
+    // arrives before every INDENT and DEDENT.
+    NsyTkNewline
+    // A block opened: the line's indentation is deeper than the
+    // enclosing one.
+    NsyTkIndent
+    // A block closed.  A line that dedents past several levels
+    // produces several of these, all at the same empty span.
+    NsyTkDedent
+    // A comment or a run of blank lines.
+    NsyTkTrivia(tr: NsyTrivia)
+    // Something the lexer could not make a token of.  Lexing
+    // continues after it.
+    NsyTkFault(kind: NsyFaultKind)
+    // The end of the source.  Exactly one, last, after the closing
+    // DEDENTs.
+    NsyTkEof
+
+// A token: what it is and where it is.  Nothing else — no text, no
+// line, no column, no file.  The text is the source and the span; the
+// line and column are `nsytoken.line_col`; the file is the caller's.
+pub struct NsyToken
+    kind: NsyTokKind
+    span: NsySpan
+
+// A short name for the kind — `"IDENT"`, `"FN"`, `"LPAREN"`,
+// `"NEWLINE"` — for a diagnostic, a test's expectation, and a
+// tree-sitter corpus comparison.
+//
+// These are the compiler's own token names, which is what lets
+// `orbit/novo-treesitter`'s corpus checks compare a run of this
+// package against `novo parse --tokens` without a translation table
+// in the middle.
+pub fn kind_name(kind: NsyTokKind) -> Str
+    todo("novo-syntax.nsytoken.kind_name")
+
+// Is this trivia — a comment or a blank-line run?
+//
+// The one predicate a consumer that wants the reference front end's
+// stream needs: filtering on it gives exactly the tokens
+// `compiler/lib/lexer.mll` produces.
+//
+// ```novo
+// use nsytoken
+//
+// fn main() [io]
+//     let t = NsyToken { kind: NsyTkTrivia(NsyTrLineComment),
+//                        span: NsySpan { start: 0, stop: 5 } }
+//     println("${nsytoken.is_trivia(t)}")
+// ```
+pub fn is_trivia(tok: NsyToken) -> Bool
+    todo("novo-syntax.nsytoken.is_trivia")
+
+// Is this one of the three synthesised layout tokens?
+pub fn is_layout(tok: NsyToken) -> Bool
+    todo("novo-syntax.nsytoken.is_layout")
+
+// Is this a fault token?
+pub fn is_fault(tok: NsyToken) -> Bool
+    todo("novo-syntax.nsytoken.is_fault")
+
+// The stream with trivia removed.
+//
+// What `nsyparse` consumes.  The parser does not thread comments —
+// keeping them out of the grammar is what keeps the grammar readable —
+// and `nsyprint` puts them back by span, which is the only place in
+// the package that has to know where they were.
+pub fn without_trivia(toks: [NsyToken]) -> [NsyToken]
+    todo("novo-syntax.nsytoken.without_trivia")
+
+// Just the fault tokens, in source order.  A caller that wants
+// diagnostics without walking the stream itself.
+pub fn faults(toks: [NsyToken]) -> [NsyToken]
+    todo("novo-syntax.nsytoken.faults")
+
+// The index of the last token that starts at or before `offset`, or
+// `None` on an empty stream.
+//
+// A binary search, so a language server asking about a keystroke does
+// not walk the file.
+pub fn index_at(toks: [NsyToken], offset: Int) -> ?Int
+    todo("novo-syntax.nsytoken.index_at")
+
+// ── decoding, on demand ─────────────────────────────────────────────
+
+// Apply the escapes in a literal run and append the result to the
+// caller's `str.builder` handle.
+//
+// INTO A CALLER'S BUFFER rather than answering a `Str`, because the
+// caller assembling a whole literal's value out of its segments would
+// otherwise allocate one string per segment and throw all but the last
+// away.  Answers the fault it stopped at, or `None` when the run
+// decoded cleanly.
+//
+// A run that came out of `nsylex` has already been checked, so the
+// answer is `None`; the fault arm is for a caller decoding a span it
+// built itself.
+pub fn unescape_into(buf: Int, src: NsySource, sp: NsySpan) -> ?NsyFaultKind
+    todo("novo-syntax.nsytoken.unescape_into")
+
+// Append the escaped spelling of `text` to the caller's buffer, in the
+// form `nsyprint` writes: the shortest escape the language defines for
+// each byte, and `\xNN` for the rest.
+pub fn escape_into(buf: Int, text: Str) -> Unit
+    todo("novo-syntax.nsytoken.escape_into")
+
+// The VALUE of a string literal token, segments concatenated and
+// escapes applied.  The convenience over `unescape_into` for a caller
+// that wants the whole thing and does not mind the allocation — a
+// `use` path, an annotation argument, a doctest's expectation.
+//
+// `None` when the token is not a string, or when a segment is a hole:
+// an interpolated string has no value until its holes are evaluated,
+// and answering the literal parts with the holes silently dropped is
+// the mistake this signature exists to refuse.
+pub fn str_value(src: NsySource, tok: NsyToken) -> ?Str
+    todo("novo-syntax.nsytoken.str_value")

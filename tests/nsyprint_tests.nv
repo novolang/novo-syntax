@@ -1,0 +1,322 @@
+// nsyprint_tests.nv — round-trip identity, and byte stability.
+//
+// RED UNTIL THE BODIES LAND.
+//
+// THE ASSERTIONS ARE THE FORMATTER'S CONTRACT, in the order of how
+// much they claim:
+//
+//   1. `parse(print(t))` is `t` — the printer does not change the
+//      program.  A printer that dropped a parenthesis passes every
+//      "looks tidy" test and fails this one.
+//   2. `print(parse(print(s)))` is `print(s)` — idempotence.
+//   3. `print(parse(s))` is `s` for canonical `s` — byte stability,
+//      which is the strongest of the three: idempotence is satisfied
+//      by a printer that mangles a file the same way twice, and this
+//      is not.
+//
+//   novo test --llvm tests/nsyprint_tests.nv     (from orbit/novo-syntax)
+
+use std.str
+use std.test
+use nsytoken
+use nsylex
+use nsyast
+use nsyparse
+use nsyprint
+
+// Print a source's own parse back out, canonically.
+fn reprint(text: Str) -> Str
+    let src = nsytoken.source(text)
+    let toks = nsylex.lex(src)
+    let r = nsyparse.parse_tokens(src, toks)
+    nsyprint.to_source(src, toks, r.tree, nsyprint.canonical())
+
+// The files below are written the way `novo fmt` writes them, so
+// reprinting each has to answer the same bytes.
+fn canonical_corpus() -> [Str]
+    ["fn main()\n    pass\n",
+     "pub fn add(a: Int, b: Int) -> Int\n    a + b\n",
+     "struct Point\n    x: Int\n    y: Int\n",
+     "enum Shape\n    Circle(r: Float)\n    Square(side: Float)\n",
+     "use std.str\n\nfn main() [io]\n    println(str.trim(\" a \"))\n",
+     "fn pick(n: Int) -> Str\n    match n\n        0 =>\n            \"zero\"\n        _ =>\n            \"more\"\n",
+     "// A documented function.\nfn documented()\n    pass\n",
+     "trait Shown\n    fn show(self) -> Str\n",
+     "alias Pair = (Int, Int)\n",
+     "const MASK = 0x00FF\n"]
+
+@test
+fn test_a_canonical_file_comes_back_byte_identical() [io]
+    for text in canonical_corpus()
+        test.case(text)
+        test.assert_eq(reprint(text), text)
+
+@test
+fn test_is_canonical_agrees_with_the_reprint() [io]
+    for text in canonical_corpus()
+        test.case(text)
+        test.assert(nsyprint.is_canonical(nsytoken.source(text),
+                                          nsyprint.canonical()))
+        test.assert(nsyprint.first_difference(nsytoken.source(text),
+                                              nsyprint.canonical()) == None)
+
+@test
+fn test_a_non_canonical_file_is_reported_at_its_first_byte() [io]
+    // A tool that only knew "this file is not formatted" would send a
+    // person to look at the whole file.
+    let src = nsytoken.source("fn  main( )\n     pass\n")
+    test.assert(not nsyprint.is_canonical(src, nsyprint.canonical()))
+    match nsyprint.first_difference(src, nsyprint.canonical())
+        Some(at) =>
+            test.assert(at >= 0)
+        None     =>
+            test.fail("a file that is not canonical reported no difference")
+
+@test
+fn test_printing_is_idempotent() [io]
+    for text in ["fn  main( )\n     pass\n",
+                 "fn f(a:Int,b:Int)->Int\n  a+b\n",
+                 "let x   =   1 + 2 * 3\n"]
+        test.case(text)
+        let once = reprint(text)
+        test.assert_eq(reprint(once), once)
+
+@test
+fn test_parentheses_the_tree_does_not_record_are_put_back() [io]
+    // The AST records no parentheses.  `(a + b) * c` and `a + b * c`
+    // are the same operators in a different SHAPE, and a printer that
+    // concatenated its children would hand the parser a flat run it
+    // re-associates by its own table — and the file silently computes
+    // a different answer.
+    test.assert_eq(reprint("let x = (a + b) * c\n"), "let x = (a + b) * c\n")
+    test.assert_eq(reprint("let x = a + b * c\n"), "let x = a + b * c\n")
+    test.case("and parentheses that change nothing are not invented")
+    test.assert_eq(reprint("let x = a * b + c\n"), "let x = a * b + c\n")
+
+@test
+fn test_a_literal_keeps_the_spelling_its_author_wrote() [io]
+    // `0x00000000` rendered from the value comes back `0x0`, and a
+    // register map stops lining up against the datasheet it was
+    // transcribed from.
+    for text in ["const MASK = 0x00FF\n",
+                 "const BIG = 1_000_000\n",
+                 "const BITS = 0b1111_0000\n",
+                 "const ZERO = 0x00000000\n"]
+        test.case(text)
+        test.assert_eq(reprint(text), text)
+
+@test
+fn test_every_comment_spelling_survives_a_reprint() [io]
+    // The scanner `novo fmt` uses today has to know all three, and a
+    // version that knew only `//` deleted the rest with no diagnostic
+    // and exit 0.  Here the comments are tokens, so there is nothing to
+    // re-scan and nothing to miss.
+    for text in ["// a line comment\nfn f()\n    pass\n",
+                 "# a hash comment\nfn f()\n    pass\n",
+                 "/* a block comment */\nfn f()\n    pass\n",
+                 "fn f()\n    // inside a body\n    pass\n"]
+        test.case(text)
+        test.assert_eq(reprint(text), text)
+
+@test
+fn test_a_blank_line_run_is_normalised_and_not_deleted() [io]
+    // A formatter that kept every blank line would never normalise;
+    // one that kept none would join every paragraph in the file.
+    let out = reprint("fn a()\n    pass\n\n\n\n\nfn b()\n    pass\n")
+    test.assert_eq(out, "fn a()\n    pass\n\nfn b()\n    pass\n")
+
+@test
+fn test_an_empty_effect_clause_is_not_deleted() [io]
+    // The one difference a printer that read only the labels loses —
+    // and loses identically on both sides of a round trip, so the
+    // round-trip assertion above cannot catch it.
+    test.assert_eq(reprint("fn go() []\n    pass\n"), "fn go() []\n    pass\n")
+    test.assert_eq(reprint("fn go()\n    pass\n"), "fn go()\n    pass\n")
+
+@test
+fn test_pub_comes_before_the_annotations() [io]
+    // `pub` binds OUTSIDE the annotation list, so the keyword comes
+    // first and the `@…` lines follow it.  Writing the annotations
+    // first does not parse.
+    let text = "pub @derive(Eq)\nstruct A\n    x: Int\n"
+    test.assert_eq(reprint(text), text)
+
+@test
+fn test_the_compact_style_writes_no_trivia_and_does_not_wrap() [io]
+    let src = nsytoken.source("fn f()\n    pass\n")
+    let toks = nsylex.lex(src)
+    let r = nsyparse.parse_tokens(src, toks)
+    let out = nsyprint.to_source(src, toks, r.tree, nsyprint.compact())
+    test.assert(str.len(out) > 0)
+    test.assert_eq(nsyprint.compact().width, 0)
+    test.assert(not nsyprint.compact().trivia)
+
+@test
+fn test_a_signature_prints_without_its_body() [io]
+    // What a hover shows and what an outline labels a row with.
+    // Printing the body and cutting it off is what this exists to
+    // avoid.
+    let src = nsytoken.source("pub async fn go(a: Int) -> Str [io]\n    \"x\"\n")
+    let r = nsyparse.parse(src)
+    match r.tree.decls[0].kind
+        NsyDcFn(f) =>
+            let buf = str.builder_new()
+            nsyprint.print_signature(buf, src, f, nsyprint.compact())
+            let out = str.builder_to_str(buf)
+            str.builder_drop(buf)
+            test.assert_eq(out, "pub async fn go(a: Int) -> Str [io]")
+        _          =>
+            test.fail("the first declaration was not a fn")
+
+@test
+fn test_a_type_prints_as_it_was_written() [io]
+    for text in ["[Str]", "[Int; 8]", "(Int, Str)", "?Int", "Result<Int, Str>",
+                 "fn(Int, Str) -> Bool [io]", "weak Node", "dyn Shown",
+                 "*const Int"]
+        test.case(text)
+        let src = nsytoken.source(text)
+        let r = nsyparse.parse_type(src, nsylex.lex(src))
+        test.assert_eq(nsyast.type_text(r.ty), text)
+
+// ── every entry point writes into the caller's buffer ───────────────
+
+fn into_buffer_decl(text: Str) -> Str
+    let src = nsytoken.source(text)
+    let toks = nsylex.lex(src)
+    let r = nsyparse.parse_tokens(src, toks)
+    let buf = str.builder_new()
+    nsyprint.print_decl(buf, src, toks, r.tree.decls[0], 0, nsyprint.canonical())
+    let out = str.builder_to_str(buf)
+    str.builder_drop(buf)
+    out
+
+@test
+fn test_print_tree_and_print_decl_agree_on_one_declaration() [io]
+    let text = "fn f()\n    pass\n"
+    let src = nsytoken.source(text)
+    let toks = nsylex.lex(src)
+    let r = nsyparse.parse_tokens(src, toks)
+    let buf = str.builder_new()
+    nsyprint.print_tree(buf, src, toks, r.tree, nsyprint.canonical())
+    let whole = str.builder_to_str(buf)
+    str.builder_drop(buf)
+    test.assert_eq(whole, text)
+    test.assert_eq(into_buffer_decl(text), text)
+
+@test
+fn test_print_stmt_writes_one_statement_at_its_depth() [io]
+    let src = nsytoken.source("fn f()\n    let x = 1\n")
+    let toks = nsylex.lex(src)
+    let r = nsyparse.parse_tokens(src, toks)
+    match r.tree.decls[0].kind
+        NsyDcFn(f) =>
+            let buf = str.builder_new()
+            nsyprint.print_stmt(buf, src, toks, f.body[0], 1, nsyprint.canonical())
+            let out = str.builder_to_str(buf)
+            str.builder_drop(buf)
+            test.assert_eq(out, "    let x = 1\n")
+        _          =>
+            test.fail("the first declaration was not a fn")
+
+@test
+fn test_print_expr_parenthesises_for_the_level_it_is_given() [io]
+    // A caller printing a subtree into a larger expression has to say
+    // what surrounds it; a printer that assumed the loosest level would
+    // emit parentheses a person did not write.
+    let src = nsytoken.source("a + b")
+    let r = nsyparse.parse_expr(src, nsylex.lex(src))
+    let loose = str.builder_new()
+    nsyprint.print_expr(loose, src, r.expr, 0, nsyprint.compact())
+    let bare = str.builder_to_str(loose)
+    str.builder_drop(loose)
+    test.assert_eq(bare, "a + b")
+    test.case("inside a tighter context it is wrapped")
+    let tight = str.builder_new()
+    nsyprint.print_expr(tight, src, r.expr, nsyast.binop_level(NsyBinMul),
+                        nsyprint.compact())
+    let wrapped = str.builder_to_str(tight)
+    str.builder_drop(tight)
+    test.assert_eq(wrapped, "(a + b)")
+    test.case("and the cascade puts * inside +")
+    test.assert(nsyast.binop_level(NsyBinMul) > nsyast.binop_level(NsyBinAdd))
+
+@test
+fn test_print_type_and_print_pat_write_what_was_written() [io]
+    let ty_src = nsytoken.source("?[Int]")
+    let t = nsyparse.parse_type(ty_src, nsylex.lex(ty_src))
+    let a = str.builder_new()
+    nsyprint.print_type(a, ty_src, t.ty)
+    let ty_out = str.builder_to_str(a)
+    str.builder_drop(a)
+    test.assert_eq(ty_out, "?[Int]")
+    test.case("and a pattern the same way")
+    let p_src = nsytoken.source("fn f()\n    match x\n        Some(v) =>\n            pass\n")
+    let p = nsyparse.parse(p_src)
+    match p.tree.decls[0].kind
+        NsyDcFn(f) =>
+            match f.body[0].kind
+                NsyStExpr(value) =>
+                    match value.kind
+                        NsyExMatch(m) =>
+                            let b = str.builder_new()
+                            nsyprint.print_pat(b, p_src, m.arms[0].pat)
+                            let pat_out = str.builder_to_str(b)
+                            str.builder_drop(b)
+                            test.assert_eq(pat_out, "Some(v)")
+                        _             =>
+                            test.fail("the statement was not a match")
+                _                =>
+                    test.fail("the body's first statement was not an expression")
+        _          =>
+            test.fail("the first declaration was not a fn")
+
+@test
+fn test_print_effects_writes_nothing_for_an_absent_clause() [io]
+    // The difference between "no clause" and "the empty clause", which
+    // every printer that forgot to read `written` deleted.
+    let absent = str.builder_new()
+    nsyprint.print_effects(absent, NsyEffects { labels: [], written: false,
+                                                span: NsySpan { start: 0, stop: 0 } })
+    let none_out = str.builder_to_str(absent)
+    str.builder_drop(absent)
+    test.assert_eq(none_out, "")
+    let empty = str.builder_new()
+    nsyprint.print_effects(empty, NsyEffects { labels: [], written: true,
+                                               span: NsySpan { start: 0, stop: 2 } })
+    let empty_out = str.builder_to_str(empty)
+    str.builder_drop(empty)
+    test.assert_eq(empty_out, "[]")
+
+@test
+fn test_expr_to_source_is_the_convenience_over_the_buffer() [io]
+    let src = nsytoken.source("f(a, b)")
+    let r = nsyparse.parse_expr(src, nsylex.lex(src))
+    test.assert_eq(nsyprint.expr_to_source(src, r.expr), "f(a, b)")
+
+@test
+fn test_write_tree_costs_what_the_sink_costs() [io]
+    // The one effect-polymorphic entry point in the package: an
+    // in-memory Buffer supplies `[]`, so this call spends nothing.
+    let text = "fn f()\n    pass\n"
+    let src = nsytoken.source(text)
+    let toks = nsylex.lex(src)
+    let r = nsyparse.parse_tokens(src, toks)
+    let sink = Buffer.new()
+    test.assert(nsyprint.write_tree(sink, src, toks, r.tree, nsyprint.canonical()) == None)
+    test.assert_eq(sink.len(), str.len(text))
+
+@test
+fn test_every_operator_spells_itself() [io]
+    // The printer is the second reader of the cascade and cannot guess
+    // it, so the spellings are surface and this is the table.
+    test.assert_eq(nsyast.binop_text(NsyBinAdd), "+")
+    test.assert_eq(nsyast.binop_text(NsyBinShrLogical), ">>>")
+    test.assert_eq(nsyast.binop_text(NsyBinRangeInc), "..=")
+    test.assert_eq(nsyast.binop_text(NsyBinAnd), "and")
+    test.assert_eq(nsyast.unop_text(NsyUnNeg), "-")
+    test.assert_eq(nsyast.unop_text(NsyUnNot), "not")
+    test.assert_eq(nsyast.unop_text(NsyUnDeref), "*")
+    test.assert_eq(nsyast.unop_text(NsyUnBNot), "~")
+    test.assert_eq(nsyast.assign_op_text(NsyAsgEq), "=")
+    test.assert_eq(nsyast.assign_op_text(NsyAsgAdd), "+=")
+    test.assert_eq(nsyast.assign_op_text(NsyAsgDiv), "/=")

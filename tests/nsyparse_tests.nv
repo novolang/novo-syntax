@@ -1,0 +1,237 @@
+// nsyparse_tests.nv — a tree from every file, and the faults beside it.
+//
+// RED UNTIL THE BODIES LAND.
+//
+// The contract this file holds the package to: `parse` NEVER answers
+// "no tree".  Half of these assertions are about files that do not
+// compile, because that is what an editor asks about — and the one
+// thing a language server cannot survive is being handed nothing while
+// somebody is typing.
+//
+//   novo test --llvm tests/nsyparse_tests.nv     (from orbit/novo-syntax)
+
+use std.list
+use std.test
+use nsytoken
+use nsyast
+use nsylex
+use nsyparse
+
+fn tree_of(text: Str) -> NsyTree
+    nsyparse.parse(nsytoken.source(text)).tree
+
+@test
+fn test_an_empty_file_parses_to_an_empty_tree() [io]
+    let r = nsyparse.parse(nsytoken.source(""))
+    test.assert(nsyparse.is_clean(r))
+    test.assert_eq(list.len(r.tree.decls), 0)
+
+@test
+fn test_one_function_is_one_declaration() [io]
+    let r = nsyparse.parse(nsytoken.source("fn main()\n    pass\n"))
+    test.assert(nsyparse.is_clean(r))
+    test.assert_eq(list.len(r.tree.decls), 1)
+    test.assert_eq(nsyast.decl_name(r.tree.decls[0]), "main")
+    test.assert_eq(nsyast.decl_kind_name(r.tree.decls[0]), "fn")
+    test.assert(not nsyast.decl_is_pub(r.tree.decls[0]))
+
+@test
+fn test_pub_is_a_field_and_not_an_annotation() [io]
+    // The reference carries `pub` as a synthetic annotation named
+    // "pub", and the formatter that printed the annotation list
+    // verbatim wrote `@pub` on a line of its own — which is not
+    // novo-lang syntax, so the formatted file stopped parsing.  Here it
+    // is a boolean, and the annotation list has nothing in it.
+    let t = tree_of("pub fn main()\n    pass\n")
+    test.assert(nsyast.decl_is_pub(t.decls[0]))
+    test.assert_eq(list.len(nsyast.decl_annots(t.decls[0])), 0)
+
+@test
+fn test_an_empty_effect_clause_is_not_a_missing_one() [io]
+    // `fn go() []` asserts the function is pure; `fn go()` asserts
+    // nothing.  A tree that recorded only the labels loses the
+    // difference on both sides of a round trip, so the round-trip gate
+    // cannot catch the loss either.
+    let written = tree_of("fn go() []\n    pass\n")
+    let absent = tree_of("fn go()\n    pass\n")
+    match written.decls[0].kind
+        NsyDcFn(f) =>
+            test.assert(f.effects.written)
+            test.assert_eq(list.len(f.effects.labels), 0)
+        _          =>
+            test.fail("the first declaration was not a fn")
+    match absent.decls[0].kind
+        NsyDcFn(f) =>
+            test.assert(not f.effects.written)
+            test.assert_eq(list.len(f.effects.labels), 0)
+        _          =>
+            test.fail("the first declaration was not a fn")
+
+@test
+fn test_every_node_carries_a_span() [io]
+    // The one place this tree differs from the reference's, and the
+    // reason: the reference added seven position fields one at a time,
+    // each after a formatter bug.  A total span is that fact stated
+    // once.
+    let t = tree_of("struct Point\n    x: Int\n    y: Int\n")
+    match t.decls[0].kind
+        NsyDcStruct(s) =>
+            test.assert_eq(list.len(s.fields), 2)
+            for f in s.fields
+                test.case(f.name)
+                test.assert(nsytoken.span_len(f.span) > 0)
+                test.assert(nsytoken.span_len(f.ty.span) > 0)
+        _              =>
+            test.fail("the first declaration was not a struct")
+
+@test
+fn test_a_literals_spelling_survives_in_its_span() [io]
+    // `0x00000000` rendered back from the value comes out `0x0`, and a
+    // register map transcribed from a datasheet stops lining up.
+    let src = nsytoken.source("const MASK = 0x00FF\n")
+    let r = nsyparse.parse(src)
+    match r.tree.decls[0].kind
+        NsyDcConst(c) =>
+            match c.value.kind
+                NsyExLit(lit) =>
+                    test.assert_eq(nsytoken.slice(src, lit.span), "0x00FF")
+                    test.assert(lit.kind == NsyLitInt(255, NsyRadixHex))
+                _             =>
+                    test.fail("the right-hand side was not a literal")
+        _             =>
+            test.fail("the first declaration was not a const")
+
+// ── recovery ────────────────────────────────────────────────────────
+
+@test
+fn test_a_broken_file_still_answers_a_tree() [io]
+    // Every keystroke between `fn f(` and `fn f(x: Int)` is a file that
+    // does not parse.
+    let r = nsyparse.parse(nsytoken.source("fn f(\nfn g()\n    pass\n"))
+    test.assert(not nsyparse.is_clean(r))
+    test.case("and the declaration after the damage is still in it")
+    test.assert(list.len(r.tree.decls) >= 2)
+
+@test
+fn test_one_bad_statement_costs_one_statement() [io]
+    let r = nsyparse.parse(nsytoken.source(
+        "fn f()\n    let a = 1\n    let = =\n    let b = 2\n"))
+    test.assert(not nsyparse.is_clean(r))
+    match r.tree.decls[0].kind
+        NsyDcFn(f) =>
+            test.assert_eq(list.len(f.body), 3)
+            test.case("the middle one is the hole and the others survived")
+            test.assert(f.body[1].kind == NsyStError)
+        _          =>
+            test.fail("the first declaration was not a fn")
+
+@test
+fn test_a_fault_names_where_the_parser_resumed() [io]
+    let r = nsyparse.parse(nsytoken.source("fn f()\n    let = =\n    pass\n"))
+    match nsyparse.first_fault(r)
+        Some(f) =>
+            test.assert(nsyparse.fault_message(f) != "")
+            test.assert(f.resumed_at != None)
+        None    =>
+            test.fail("a file that does not parse reported no fault")
+
+@test
+fn test_an_unclosed_bracket_points_at_the_opener() [io]
+    // The opener is what a person has to go and look at; the end of the
+    // file is not.
+    let r = nsyparse.parse(nsytoken.source("fn f()\n    g(1, 2\n"))
+    match nsyparse.first_fault(r)
+        Some(f) =>
+            test.assert(f.kind == NsyPfUnclosed(NsyPuLParen))
+            test.assert(f.span.start < 20)
+        None    =>
+            test.fail("an unclosed bracket reported no fault")
+
+@test
+fn test_a_lexical_fault_is_reported_once() [io]
+    // The parser does not re-diagnose what the lexer already named, so
+    // a consumer has ONE list of diagnostics for a file.
+    let r = nsyparse.parse(nsytoken.source("fn f()\n    let a = \"\\q\"\n"))
+    test.assert_eq(list.len(r.faults), 1)
+    test.assert(r.faults[0].kind == NsyPfLexical(NsyFtUnknownEscape))
+
+@test
+fn test_the_recovery_policy_is_a_predicate_anyone_can_call() [io]
+    // The rule that decides how much of a file one typo costs is a
+    // function, not a loop condition buried where it can only be
+    // inferred from the damage.  The EOF is always a recovery point, so
+    // the walk terminates on any stream.
+    let src = nsytoken.source("fn f()\n    let a = 1\n    let b = 2\n")
+    let toks = nsylex.lex(src)
+    let last = list.len(toks) - 1
+    test.assert(nsyparse.is_recovery_point(toks, last))
+    test.case("and the search never runs past the end")
+    test.assert_eq(nsyparse.next_recovery_point(toks, last), last)
+
+@test
+fn test_recovery_never_points_inside_an_unclosed_bracket() [io]
+    // Skipping out of a bracket loses the pairing that said where we
+    // were, so no position inside one is offered.
+    let toks = nsylex.lex(nsytoken.source("fn f()\n    g(1,\n"))
+    var i = 0
+    var inside = 0
+    for t in toks
+        match t.kind
+            NsyTkPunct(p) =>
+                if p == NsyPuLParen
+                    inside = i + 1
+            _             =>
+                pass
+        i = i + 1
+    test.assert(inside > 0)
+    test.assert(not nsyparse.is_recovery_point(toks, inside))
+
+// ── the smaller entry points ────────────────────────────────────────
+
+@test
+fn test_parse_expr_reads_one_expression() [io]
+    let src = nsytoken.source("a + b * c")
+    let r = nsyparse.parse_expr(src, nsylex.lex(src))
+    test.assert_eq(list.len(r.faults), 0)
+
+@test
+fn test_parse_type_reads_one_written_type() [io]
+    let src = nsytoken.source("[(Int, Str)]")
+    let r = nsyparse.parse_type(src, nsylex.lex(src))
+    test.assert_eq(list.len(r.faults), 0)
+    test.assert_eq(nsyast.type_text(r.ty), "[(Int, Str)]")
+
+@test
+fn test_an_impl_key_is_the_same_from_both_sides() [io]
+    // One function computes the key, so a definition site and a use
+    // site cannot disagree about where an impl lives.
+    let a = nsytoken.source("[Str]")
+    test.assert_eq(nsyast.impl_target_key(nsyparse.parse_type(a, nsylex.lex(a)).ty),
+                   "list_Str")
+    test.case("and a fixed-size array keys as its list does")
+    let b = nsytoken.source("[Str; 4]")
+    test.assert_eq(nsyast.impl_target_key(nsyparse.parse_type(b, nsylex.lex(b)).ty),
+                   "list_Str")
+
+@test
+fn test_a_hole_parses_to_an_expression_at_file_offsets() [io]
+    // The token run inside a hole was lexed by a lexer seeded to the
+    // hole's file offset, so the expression this answers is findable by
+    // the same offset search as the rest of the file.
+    let src = nsytoken.source("let s = \"n=\${a + b}\"\n")
+    let hole = NsySegHole(NsySpan { start: 13, stop: 18 },
+                          nsylex.lex(nsytoken.source("a + b")))
+    let r = nsyparse.parse_hole(src, hole)
+    test.assert_eq(list.len(r.faults), 0)
+    test.case("and a literal run is the caller's mistake, not the source's")
+    let lit = nsyparse.parse_hole(src, NsySegLit(NsySpan { start: 9, stop: 11 }))
+    test.assert(lit.expr.kind == NsyExError)
+
+@test
+fn test_faults_are_asked_for_one_line_at_a_time() [io]
+    // What an editor asks for when it draws a gutter.
+    let src = nsytoken.source("fn f()\n    let = =\n    let = =\n")
+    let r = nsyparse.parse(src)
+    test.assert(list.len(nsyparse.faults_on_line(src, r.faults, 2)) >= 1)
+    test.case("and a clean line has none")
+    test.assert_eq(list.len(nsyparse.faults_on_line(src, r.faults, 1)), 0)
