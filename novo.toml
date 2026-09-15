@@ -1,6 +1,6 @@
 [package]
 name        = "novo-syntax"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "novo-lang's own front end as a library: the indentation-sensitive lexer, the recursive-descent parser, the typed AST with a span on every node, a visitor, a canonical printer, the resolution and effect-row tables, and the queries an editor asks — all of it over source the caller holds, with no file system anywhere."
 
 license     = "Apache-2.0"
