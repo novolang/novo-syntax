@@ -106,10 +106,11 @@ pub fn enclosing_body(tree: NsyTree, offset: Int) -> [NsyStmt]
 // is the only kind of file it is ever asked about.
 pub enum NsyPlaceKind
     // A value: after `=`, inside a call's arguments, on either side of
-    // an operator.
+    // an operator, and after a `:` inside a postfix `[…]`, where the
+    // colon separates the bounds of a slice.
     NsyPlExpr
     // A type: after a `:` in a parameter or field, after `->`, inside
-    // `<…>`.
+    // `<…>`.  A `:` inside a postfix `[…]` is not one of these.
     NsyPlType
     // A pattern: after `match`'s INDENT, after `for`, after `let` and
     // `var` before the `=`.
@@ -149,6 +150,12 @@ pub struct NsyPlace
     prefix: Str
 
 // The place an offset is in.
+//
+// A `:` is read by what encloses it.  After a parameter or field name
+// it starts a type.  Inside a postfix `[…]`, the brackets that follow
+// an expression, it separates the bounds of a slice, so `xs[1:` asks
+// for an expression.  A `[` that starts a list literal or a list type
+// is not postfix.
 //
 // ```novo
 // use nsytoken

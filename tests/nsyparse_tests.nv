@@ -195,6 +195,26 @@ fn test_parse_expr_reads_one_expression() [io]
     test.assert_eq(list.len(r.faults), 0)
 
 @test
+fn test_a_subscript_with_a_colon_is_a_slice() [io]
+    // Every bound is optional.  The one the source left out is `None`,
+    // so `xs[::-1]` has a step and nothing else.
+    let src = nsytoken.source("xs[::-1]")
+    let r = nsyparse.parse_expr(src, nsylex.lex(src))
+    test.assert_eq(list.len(r.faults), 0)
+    match r.expr.kind
+        NsyExSlice(_, lo, hi, step) =>
+            test.assert(lo == None)
+            test.assert(hi == None)
+            test.assert(step != None)
+        _                           =>
+            test.fail("xs[::-1] did not parse as a slice")
+    test.case("and a subscript with no colon is still an index")
+    let one = nsytoken.source("xs[1]")
+    match nsyparse.parse_expr(one, nsylex.lex(one)).expr.kind
+        NsyExIndex(_, _) => test.assert(true)
+        _                => test.fail("xs[1] did not parse as an index")
+
+@test
 fn test_parse_type_reads_one_written_type() [io]
     let src = nsytoken.source("[(Int, Str)]")
     let r = nsyparse.parse_type(src, nsylex.lex(src))

@@ -320,6 +320,12 @@ pub enum NsyExprKind
     NsyExSafeField(recv: NsyExpr, name: Str)
     // `a[i]`
     NsyExIndex(recv: NsyExpr, index: NsyExpr)
+    // `a[lo:hi:step]`, with every bound optional: `a[1:]`, `a[:]` and
+    // `a[::-1]` are all slices.  A bound the source left out is `None`,
+    // and the second `:` is written only when `step` is present.  Python
+    // gives the bounds their meaning, so a negative bound counts from
+    // the end.
+    NsyExSlice(recv: NsyExpr, lo: ?NsyExpr, hi: ?NsyExpr, step: ?NsyExpr)
     NsyExBinop(op: NsyBinOp, left: NsyExpr, right: NsyExpr)
     NsyExUnop(op: NsyUnOp, operand: NsyExpr)
     // `a |> b`

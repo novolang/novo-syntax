@@ -190,6 +190,26 @@ fn test_a_half_written_annotation_is_a_type_place() [io]
     test.assert(place.kind == NsyPlType)
 
 @test
+fn test_a_colon_inside_a_subscript_is_an_expression_place() [io]
+    // `xs[1:` is half a slice.  The colon separates two bounds, and a
+    // bound is an expression, so nothing here asks for a type.
+    let src = nsytoken.source("fn f()\n    xs[1:\n")
+    test.assert(nsyquery.place_at(src, [], 16).kind == NsyPlExpr)
+    test.case("while the colon after a parameter name still starts a type")
+    let param = nsytoken.source("fn f(xs: \n")
+    test.assert(nsyquery.place_at(param, [], 9).kind == NsyPlType)
+
+@test
+fn test_a_slice_lists_only_the_bounds_it_has() [io]
+    let whole = nsytoken.source("xs[:]")
+    let w = nsyparse.parse_expr(whole, nsylex.lex(whole)).expr
+    test.assert_eq(list.len(nsyvisit.expr_children(w)), 1)
+    test.case("and a receiver, a start and a step are three")
+    let every = nsytoken.source("xs[1::2]")
+    let e = nsyparse.parse_expr(every, nsylex.lex(every)).expr
+    test.assert_eq(list.len(nsyvisit.expr_children(e)), 3)
+
+@test
 fn test_prose_is_a_place_where_nothing_is_suggested() [io]
     // Saying so is not the same as having no answer.
     let src = nsytoken.source("// a comment here\n")
@@ -226,18 +246,19 @@ fn test_a_blank_line_breaks_the_attachment() [io]
 
 // ── the visitor ─────────────────────────────────────────────────────
 
-// A visitor is a type with fields, and the accumulator is `mut self`.
+// A visitor is a type with fields, and the accumulator is `var self`.
+// The fields it counts in are `var`, because the walk assigns them.
 struct NsytCounter
-    exprs: Int
-    names: Int
+    var exprs: Int
+    var names: Int
 
 impl NsyVisitor[] for NsytCounter
-    fn enter_expr(mut self, value: NsyExpr) -> Bool
+    fn enter_expr(var self, value: NsyExpr) -> Bool
         let _ = value
         self.exprs = self.exprs + 1
         true
 
-    fn visit_name(mut self, name: Str, span: NsySpan, role: NsyNameRole)
+    fn visit_name(var self, name: Str, span: NsySpan, role: NsyNameRole)
         let _ = name
         let _ = span
         let _ = role
@@ -313,10 +334,10 @@ fn test_walking_an_expression_and_a_pattern_on_their_own() [io]
 // A rewriter that renames nothing: the identity, so the assertion is
 // that the WALK reaches everything, not that the rule does.
 struct NsytIdentity
-    seen: Int
+    var seen: Int
 
 impl NsyRewriter[] for NsytIdentity
-    fn rewrite_expr(mut self, value: NsyExpr) -> NsyExpr
+    fn rewrite_expr(var self, value: NsyExpr) -> NsyExpr
         self.seen = self.seen + 1
         value
 

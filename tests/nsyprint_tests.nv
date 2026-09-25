@@ -43,7 +43,9 @@ fn canonical_corpus() -> [Str]
      "// A documented function.\nfn documented()\n    pass\n",
      "trait Shown\n    fn show(self) -> Str\n",
      "alias Pair = (Int, Int)\n",
-     "const MASK = 0x00FF\n"]
+     "const MASK = 0x00FF\n",
+     "fn tail(xs: [Int]) -> [Int]\n    xs[1:]\n",
+     "fn backwards(xs: [Int]) -> [Int]\n    xs[::-1]\n"]
 
 @test
 fn test_a_canonical_file_comes_back_byte_identical() [io]

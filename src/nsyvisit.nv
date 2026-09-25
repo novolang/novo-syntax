@@ -26,7 +26,7 @@
 // novo-syntax where a caller's effects flow through, and it is the
 // only place where anything needs to.
 //
-// AND THE ACCUMULATOR IS `mut self`.  A separate fold threading a
+// AND THE ACCUMULATOR IS `var self`.  A separate fold threading a
 // value would need a type parameter the language monomorphises into
 // the same code, so the fold IS the visitor: whatever a fold would
 // carry, an impl carries in its own fields.
@@ -77,47 +77,47 @@ pub enum NsyNameRole
 // subtree, which is what an outline does at a function body and what a
 // query that has already found its answer does everywhere.
 pub trait NsyVisitor[e]
-    fn enter_decl(mut self, decl: NsyDecl) -> Bool [e]
+    fn enter_decl(var self, decl: NsyDecl) -> Bool [e]
         let _ = decl
         true
 
-    fn leave_decl(mut self, decl: NsyDecl) [e]
+    fn leave_decl(var self, decl: NsyDecl) [e]
         let _ = decl
         pass
 
-    fn enter_stmt(mut self, stmt: NsyStmt) -> Bool [e]
+    fn enter_stmt(var self, stmt: NsyStmt) -> Bool [e]
         let _ = stmt
         true
 
-    fn leave_stmt(mut self, stmt: NsyStmt) [e]
+    fn leave_stmt(var self, stmt: NsyStmt) [e]
         let _ = stmt
         pass
 
-    fn enter_expr(mut self, value: NsyExpr) -> Bool [e]
+    fn enter_expr(var self, value: NsyExpr) -> Bool [e]
         let _ = value
         true
 
-    fn leave_expr(mut self, value: NsyExpr) [e]
+    fn leave_expr(var self, value: NsyExpr) [e]
         let _ = value
         pass
 
-    fn enter_pat(mut self, pat: NsyPat) -> Bool [e]
+    fn enter_pat(var self, pat: NsyPat) -> Bool [e]
         let _ = pat
         true
 
-    fn leave_pat(mut self, pat: NsyPat) [e]
+    fn leave_pat(var self, pat: NsyPat) [e]
         let _ = pat
         pass
 
-    fn enter_type(mut self, ty: NsyType) -> Bool [e]
+    fn enter_type(var self, ty: NsyType) -> Bool [e]
         let _ = ty
         true
 
-    fn leave_type(mut self, ty: NsyType) [e]
+    fn leave_type(var self, ty: NsyType) [e]
         let _ = ty
         pass
 
-    fn enter_annot(mut self, annot: NsyAnnot) -> Bool [e]
+    fn enter_annot(var self, annot: NsyAnnot) -> Bool [e]
         let _ = annot
         true
 
@@ -126,12 +126,12 @@ pub trait NsyVisitor[e]
     // region's size.  The last three are the ones a hand-written
     // walker forgets, because they are the only literals that are not
     // under an expression.
-    fn visit_lit(mut self, lit: NsyLit) [e]
+    fn visit_lit(var self, lit: NsyLit) [e]
         let _ = lit
         pass
 
     // Every identifier occurrence, with what it is doing there.
-    fn visit_name(mut self, name: Str, span: NsySpan, role: NsyNameRole) [e]
+    fn visit_name(var self, name: Str, span: NsySpan, role: NsyNameRole) [e]
         let _ = name
         let _ = span
         let _ = role
@@ -148,31 +148,31 @@ pub trait NsyVisitor[e]
 //     let r = nsyparse.parse(nsytoken.source("pass\n"))
 //     println("${list.len(r.tree.decls)}")
 // ```
-pub fn walk_tree<V: NsyVisitor[e]>(mut v: V, tree: NsyTree) [e]
+pub fn walk_tree<V: NsyVisitor[e]>(var v: V, tree: NsyTree) [e]
     todo("novo-syntax.nsyvisit.walk_tree")
 
 // Walk one declaration.
-pub fn walk_decl<V: NsyVisitor[e]>(mut v: V, decl: NsyDecl) [e]
+pub fn walk_decl<V: NsyVisitor[e]>(var v: V, decl: NsyDecl) [e]
     todo("novo-syntax.nsyvisit.walk_decl")
 
 // Walk a block of statements.
-pub fn walk_stmts<V: NsyVisitor[e]>(mut v: V, body: [NsyStmt]) [e]
+pub fn walk_stmts<V: NsyVisitor[e]>(var v: V, body: [NsyStmt]) [e]
     todo("novo-syntax.nsyvisit.walk_stmts")
 
 // Walk one statement.
-pub fn walk_stmt<V: NsyVisitor[e]>(mut v: V, stmt: NsyStmt) [e]
+pub fn walk_stmt<V: NsyVisitor[e]>(var v: V, stmt: NsyStmt) [e]
     todo("novo-syntax.nsyvisit.walk_stmt")
 
 // Walk one expression.
-pub fn walk_expr<V: NsyVisitor[e]>(mut v: V, value: NsyExpr) [e]
+pub fn walk_expr<V: NsyVisitor[e]>(var v: V, value: NsyExpr) [e]
     todo("novo-syntax.nsyvisit.walk_expr")
 
 // Walk one pattern.
-pub fn walk_pat<V: NsyVisitor[e]>(mut v: V, pat: NsyPat) [e]
+pub fn walk_pat<V: NsyVisitor[e]>(var v: V, pat: NsyPat) [e]
     todo("novo-syntax.nsyvisit.walk_pat")
 
 // Walk one written type.
-pub fn walk_type<V: NsyVisitor[e]>(mut v: V, ty: NsyType) [e]
+pub fn walk_type<V: NsyVisitor[e]>(var v: V, ty: NsyType) [e]
     todo("novo-syntax.nsyvisit.walk_type")
 
 // ── rewriting ───────────────────────────────────────────────────────
@@ -196,35 +196,35 @@ pub fn walk_type<V: NsyVisitor[e]>(mut v: V, ty: NsyType) [e]
 // a rule that matches on a child sees the rewritten one.  A rule that
 // needs the original has its own node's `span` and the source.
 pub trait NsyRewriter[e]
-    fn rewrite_decl(mut self, decl: NsyDecl) -> NsyDecl [e]
+    fn rewrite_decl(var self, decl: NsyDecl) -> NsyDecl [e]
         decl
 
-    fn rewrite_stmt(mut self, stmt: NsyStmt) -> NsyStmt [e]
+    fn rewrite_stmt(var self, stmt: NsyStmt) -> NsyStmt [e]
         stmt
 
-    fn rewrite_expr(mut self, value: NsyExpr) -> NsyExpr [e]
+    fn rewrite_expr(var self, value: NsyExpr) -> NsyExpr [e]
         value
 
-    fn rewrite_pat(mut self, pat: NsyPat) -> NsyPat [e]
+    fn rewrite_pat(var self, pat: NsyPat) -> NsyPat [e]
         pat
 
-    fn rewrite_type(mut self, ty: NsyType) -> NsyType [e]
+    fn rewrite_type(var self, ty: NsyType) -> NsyType [e]
         ty
 
 // Rewrite a whole file, post-order.
-pub fn rewrite_tree<R: NsyRewriter[e]>(mut r: R, tree: NsyTree) -> NsyTree [e]
+pub fn rewrite_tree<R: NsyRewriter[e]>(var r: R, tree: NsyTree) -> NsyTree [e]
     todo("novo-syntax.nsyvisit.rewrite_tree")
 
 // Rewrite one declaration and everything under it.
-pub fn rewrite_decl<R: NsyRewriter[e]>(mut r: R, decl: NsyDecl) -> NsyDecl [e]
+pub fn rewrite_decl<R: NsyRewriter[e]>(var r: R, decl: NsyDecl) -> NsyDecl [e]
     todo("novo-syntax.nsyvisit.rewrite_decl")
 
 // Rewrite a block of statements.
-pub fn rewrite_stmts<R: NsyRewriter[e]>(mut r: R, body: [NsyStmt]) -> [NsyStmt] [e]
+pub fn rewrite_stmts<R: NsyRewriter[e]>(var r: R, body: [NsyStmt]) -> [NsyStmt] [e]
     todo("novo-syntax.nsyvisit.rewrite_stmts")
 
 // Rewrite one expression and everything under it.
-pub fn rewrite_expr<R: NsyRewriter[e]>(mut r: R, value: NsyExpr) -> NsyExpr [e]
+pub fn rewrite_expr<R: NsyRewriter[e]>(var r: R, value: NsyExpr) -> NsyExpr [e]
     todo("novo-syntax.nsyvisit.rewrite_expr")
 
 // ── the structure, as data ──────────────────────────────────────────
@@ -236,6 +236,10 @@ pub fn rewrite_expr<R: NsyRewriter[e]>(mut r: R, value: NsyExpr) -> NsyExpr [e]
 // they are not what the walkers are built on.
 
 // The expression children of an expression, in source order.
+//
+// An optional child that the source left out is not listed.  A slice
+// answers its receiver and the bounds it has, so `a[:]` has one child
+// and `a[1::2]` has three.
 pub fn expr_children(value: NsyExpr) -> [NsyExpr]
     todo("novo-syntax.nsyvisit.expr_children")
 

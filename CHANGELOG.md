@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.0.3 — 2026-09-25
+
+The interface follows novo 0.10.0, which adds slices to the language:
+`xs[lo:hi]`, `xs[lo:hi:step]`, `xs[:]` and `xs[::-1]`, with Python's
+rules.  Every body is still `todo()`.
+
+- `NsyExprKind` has a new arm, `NsyExSlice(recv, lo, hi, step)`, beside
+  `NsyExIndex`.  Each bound is optional.  This changes a public
+  declaration: a `match` over `NsyExprKind` that names every arm and has
+  no wildcard needs one more arm.
+- `place_at` is documented to answer an expression place after a `:`
+  inside a postfix `[…]`, where the colon separates slice bounds.  After
+  a parameter or field name, a `:` still starts a type.
+- `expr_children` is documented to list only the bounds a slice has.
+- New tests cover parsing a slice, printing one back byte for byte, its
+  children, and the place after its colon.
+- The fields of the test visitors are declared `var`, since the walk
+  assigns them and novo 0.10.0 assigns only a `var` field.  The sources
+  spell the marker on a written-through parameter and receiver `var`,
+  as the 0.10.0 formatter prints `mut`.  The two spellings mean the same
+  thing.
+
 ## 0.0.2 — 2026-09-15
 
 README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.
